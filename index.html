@@ -1,0 +1,536 @@
+<!doctype html>
+<html lang="es">
+
+<head>
+  <meta charset="utf-8" />
+  <title>PANEL DE EMERGENCIAS</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" href="imagenes/logoFMT.jpg" type="image/jpg">
+  <style>
+    :root {
+      --card: #dfdfe7;
+      --fg: #1d232b;
+      --muted: #6b7280;
+      --bg: #ffffff;
+
+      --red: #dc3545;
+      --orange: #fd7e14;
+      --blue: #0d6efd;
+      --green: #198754;
+
+      --radius: 16px;
+      --shadow: 0 8px 24px rgba(0, 0, 0, .08);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: Arial, Helvetica, sans-serif;
+      background: var(--bg);
+      color: var(--fg);
+    }
+
+    .wrap {
+      max-width: 1000px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+
+    /* TARJETAS Y BARRAS */
+    .toolbar,
+    .card {
+      background: var(--card);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 18px;
+      margin-bottom: 18px;
+    }
+
+    .toolbar {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    /* BOTONES GENERALES */
+    button {
+      border: 0;
+      border-radius: 12px;
+      padding: 14px 18px;
+      font-size: 16px;
+      font-weight: 700;
+      cursor: pointer;
+      color: #fff;
+      transition: all 0.2s ease;
+    }
+
+    button:hover {
+      transform: scale(1.08);
+      filter: brightness(1.1);
+    }
+
+    button:active {
+      transform: scale(0.95);
+    }
+
+    /* COLORES BOTONES */
+    .btn-connect {
+      background: var(--muted);
+    }
+
+    .btn-fire {
+      background: var(--red);
+      animation: pulse 2s infinite;
+    }
+
+    .btn-burn {
+      background: var(--green);
+      animation: pulse 2.5s infinite;
+    }
+
+    .btn-homaq {
+      background: var(--blue);
+      animation: pulse 3s infinite;
+    }
+
+    .btn-stop {
+      background: #6c757d;
+    }
+
+    .btn-clear {
+      background: #198754;
+    }
+
+    /* STATUS */
+    .status {
+      font-size: 15px;
+      color: var(--muted);
+      font-weight: 700;
+    }
+
+    /* GRID SECTORES */
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+      gap: 12px;
+      margin-top: 14px;
+    }
+
+    /* 🔥 BOTONES DE SECTORES (CORREGIDOS) */
+    .sector-btn {
+      background: var(--red);
+      color: #fff;
+      padding: 16px;
+      border-radius: 14px;
+      text-align: center;
+      font-size: 18px;
+      font-weight: 800;
+      cursor: pointer;
+      user-select: none;
+      transition: all 0.2s ease;
+    }
+
+    /* MISMO EFECTO QUE BOTONES */
+    .sector-btn:hover {
+      transform: scale(1.08);
+      filter: brightness(1.1);
+    }
+
+    .sector-btn:active {
+      transform: scale(0.95);
+    }
+
+    /* OCULTAR */
+    .hidden {
+      display: none;
+    }
+
+    /* ALARMA */
+    .alarm-box {
+      margin-top: 8px;
+      height: 140px;
+      border-radius: 20px;
+      background: #ffffff;
+      border: 3px solid #F57100;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 28px;
+      font-weight: 800;
+      color: #4d5968;
+      transition: all .08s linear;
+    }
+
+    .alarm-box.on {
+      background: #ff3b30;
+      border-color: #b00000;
+      color: #fff;
+      box-shadow:
+        0 0 18px rgba(255, 59, 48, .8),
+        0 0 50px rgba(255, 59, 48, .45);
+      transform: scale(1.01);
+    }
+
+    .alarm-subtitle {
+      margin-top: 10px;
+      min-height: 28px;
+      font-size: 22px;
+      font-weight: 800;
+      text-align: center;
+      color: #2b3440;
+    }
+
+    /* LOG */
+    .log {
+      margin-top: 12px;
+      background: #111827;
+      color: #d1f7d6;
+      border-radius: 12px;
+      min-height: 180px;
+      padding: 12px;
+      font-family: Consolas, monospace;
+      font-size: 13px;
+      white-space: pre-wrap;
+      overflow: auto;
+    }
+
+    /* TITULO */
+    h1 {
+      position: relative;
+      text-align: center;
+      min-height: 120px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+
+    .logo {
+      position: absolute;
+      left: 10px;
+      top: 50%;
+      transform: translateY(-50%);
+      width: 120px;
+    }
+
+    @media (max-width: 600px) {
+      .logo {
+        position: static;
+        transform: none;
+        display: block;
+        margin: 0 auto 10px;
+        width: 80px;
+      }
+    }
+
+    /* FOOTER */
+    .footer {
+      background: #F57100;
+      color: #fff;
+      text-align: center;
+      padding: 15px;
+      margin-top: 30px;
+      font-size: 14px;
+    }
+
+    /* ANIMACIÓN PULSO */
+    @keyframes pulse {
+      0% {
+        box-shadow: 0 0 0 0 rgba(255, 0, 0, 0.6);
+      }
+
+      70% {
+        box-shadow: 0 0 0 12px rgba(255, 0, 0, 0);
+      }
+
+      100% {
+        box-shadow: 0 0 0 0 rgba(255, 0, 0, 0);
+      }
+    }
+
+    /* TITULOS */
+    .card h2,
+    #sectorCard h2 {
+      text-align: center;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="wrap">
+    <h1><img src="imagenes/logoFMT2.jpg" alt="Logo" class="logo">
+      Panel de Emergencias</h1>
+
+    <div class="toolbar">
+      <button id="btnFire" class="btn btn-fire">Incendio</button>
+      <button id="btnBurn" class="btn btn-burn">Quemada</button>
+      <button id="btnHomaq" class="btn btn-homaq">HOMAQ</button>
+      <button id="btnStop" class="btn btn-stop">Stop</button>
+      <div id="status" class="status">Desconectado de Node-RED</div>
+    </div>
+    <div class="toolbar" id="toolbarSerial">
+      <button class="btn-connect" id="btnConnect">Conectar Node-RED</button>
+      <button class="btn-clear" id="btnClear">Limpiar log</button>
+    </div>
+
+    
+      <div id="sectorCard" class="sector-card hidden">
+        <div class="card">
+        <h2>Seleccione Sector de Incendio</h2>
+        <div id="sectorGrid" class="grid"></div>
+      </div>
+    </div>
+    <div class="card">
+      <div id="alertBox" class="alert-box">
+        <div id="alarmLabel" class="alert-label">SIN EVENTO</div>
+        <div id="log" class="log"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const NODE_RED_BASE = "http://192.168.0.222:1880";
+
+    let alertBusy = false;
+    let alertToken = 0;
+
+    const statusEl = document.getElementById("status");
+    const logEl = document.getElementById("log");
+    const alertBox = document.getElementById("alertBox");
+    const alarmLabel = document.getElementById("alarmLabel");
+    const sectorCard = document.getElementById("sectorCard");
+    const sectorGrid = document.getElementById("sectorGrid");
+
+    function log(msg) {
+      const time = new Date().toLocaleTimeString();
+      logEl.textContent += `[${time}] ${msg}\n`;
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function clearLog() {
+      logEl.textContent = "";
+      log("Log limpiado");
+    }
+
+    function setStatus(msg) {
+      statusEl.textContent = msg;
+    }
+
+    function setAlarmLabel(text) {
+      alarmLabel.textContent = text;
+    }
+
+    function sleep(ms) {
+      return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    function setBlinkState(on) {
+      alertBox.classList.toggle("on", on);
+    }
+
+    function clearBlink() {
+      setBlinkState(false);
+    }
+
+    function resetAlarmVisual() {
+      clearBlink();
+      setAlarmLabel("SIN EVENTO");
+    }
+
+    async function blink(onMs, offMs, times, tokenRef) {
+      for (let i = 0; i < times; i++) {
+        if (tokenRef !== alertToken) return;
+        setBlinkState(true);
+        await sleep(onMs);
+        if (tokenRef !== alertToken) return;
+        setBlinkState(false);
+        await sleep(offMs);
+      }
+    }
+
+    async function runFirePattern(sector, tokenRef) {
+      setAlarmLabel(`INCENDIO - SECTOR ${sector}`);
+      for (let rep = 0; rep < 2; rep++) {
+        if (tokenRef !== alertToken) return;
+        await blink(1600, 1600, 3, tokenRef);
+        if (tokenRef !== alertToken) return;
+        setBlinkState(false);
+        await sleep(2500);
+        if (tokenRef !== alertToken) return;
+        await blink(700, 700, sector, tokenRef);
+      }
+      if (tokenRef === alertToken) resetAlarmVisual();
+    }
+
+    async function runBlastPattern(tokenRef) {
+      setAlarmLabel("QUEMADA");
+      for (let rep = 0; rep < 2; rep++) {
+        const start = Date.now();
+        while ((Date.now() - start) < 10000) {
+          if (tokenRef !== alertToken) return;
+          setBlinkState(true);
+          await sleep(1000);
+          if (tokenRef !== alertToken) return;
+          setBlinkState(false);
+          await sleep(1000);
+        }
+      }
+      if (tokenRef === alertToken) resetAlarmVisual();
+    }
+
+    async function runHomaqPattern(tokenRef) {
+      setAlarmLabel("HOMAQ");
+      for (let rep = 0; rep < 2; rep++) {
+        const start = Date.now();
+        while ((Date.now() - start) < 10000) {
+          if (tokenRef !== alertToken) return;
+          setBlinkState(true);
+          await sleep(500);
+          if (tokenRef !== alertToken) return;
+          setBlinkState(false);
+          await sleep(500);
+        }
+      }
+      if (tokenRef === alertToken) resetAlarmVisual();
+    }
+
+    async function ejecutarAlertaVisual(major, minor) {
+      alertToken++;
+      const myToken = alertToken;
+      alertBusy = true;
+
+      try {
+        resetAlarmVisual();
+
+        if (major === 100 && minor >= 1 && minor <= 9) {
+          log(`Blink local: INCENDIO sector ${minor}`);
+          await runFirePattern(minor, myToken);
+        } else if (major === 200 && minor === 10) {
+          log("Blink local: QUEMADA");
+          await runBlastPattern(myToken);
+        } else if (major === 300 && minor === 20) {
+          log("Blink local: HOMAQ");
+          await runHomaqPattern(myToken);
+        } else {
+          setAlarmLabel(`SIN PATRÓN ${major},${minor}`);
+          log(`Sin patrón visual para ${major},${minor}`);
+        }
+      } finally {
+        if (myToken === alertToken) {
+          alertBusy = false;
+          resetAlarmVisual();
+        }
+      }
+    }
+
+    function cancelarAlertaVisual() {
+      alertToken++;
+      alertBusy = false;
+      resetAlarmVisual();
+      log("Blink local detenido");
+    }
+
+    async function callNodeRed(path, payload = {}) {
+      try {
+        const res = await fetch(`${NODE_RED_BASE}${path}`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify(payload)
+        });
+
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}`);
+        }
+
+        const data = await res.json().catch(() => ({}));
+        return { ok: true, data };
+      } catch (err) {
+        log("Error Node-RED: " + err.message);
+        return { ok: false, error: err.message };
+      }
+    }
+
+    async function probarConexion() {
+      const r = await callNodeRed("/ping", { test: true });
+      if (r.ok) {
+        setStatus("Conectado a Node-RED");
+        log("Conexión OK con Node-RED");
+      } else {
+        setStatus("Sin conexión a Node-RED");
+      }
+    }
+
+    async function lanzarComando(major, minor) {
+      const cmd = `${major},${minor}`;
+      const r = await callNodeRed("/serial/send", {
+        command: cmd
+      });
+
+      if (!r.ok) return;
+
+      log("TX -> " + cmd);
+      await ejecutarAlertaVisual(major, minor);
+    }
+
+    document.getElementById("btnConnect").addEventListener("click", async () => {
+      await probarConexion();
+    });
+
+    document.getElementById("btnFire").addEventListener("click", () => {
+      sectorCard.classList.remove("hidden");
+      log("Selecciona sector para INCENDIO");
+    });
+
+    document.getElementById("btnBurn").addEventListener("click", async () => {
+      sectorCard.classList.add("hidden");
+      await lanzarComando(200, 10);
+    });
+
+    document.getElementById("btnHomaq").addEventListener("click", async () => {
+      sectorCard.classList.add("hidden");
+      await lanzarComando(300, 20);
+    });
+
+    document.getElementById("btnStop").addEventListener("click", async () => {
+      sectorCard.classList.add("hidden");
+      const r = await callNodeRed("/serial/send", { command: "stop" });
+      if (r.ok) {
+        log("TX -> stop");
+      }
+      cancelarAlertaVisual();
+    });
+
+    document.getElementById("btnClear").addEventListener("click", () => {
+      clearLog();
+    });
+
+    for (let i = 1; i <= 9; i++) {
+      const btn = document.createElement("div");
+      btn.className = "sector-btn";
+      btn.textContent = `Sector ${i}`;
+      btn.addEventListener("click", async () => {
+        sectorCard.classList.add("hidden");
+        await lanzarComando(100, i);
+      });
+      sectorGrid.appendChild(btn);
+    }
+
+    resetAlarmVisual();
+    setStatus("Desconectado de Node-RED");
+    log("Panel cargado");
+  </script>
+</body>
+<footer class="footer">
+  <p>© 2026 Panel de Emergencias - Todos Los Drechos Reservados</p>
+  <p><a href="https://www.bbosch.cl/servicios/fmt/" target="_blank">
+      FMT bbosh
+    </a></p>
+</footer>
+
+</html>

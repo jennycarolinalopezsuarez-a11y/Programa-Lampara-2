@@ -1,0 +1,210 @@
+[
+    {
+        "id": "b7a2d2d1a9c00101",
+        "type": "tab",
+        "label": "XIAO USB LED",
+        "disabled": false,
+        "info": ""
+    },
+    {
+        "id": "inj_red_xiao",
+        "type": "inject",
+        "z": "b7a2d2d1a9c00101",
+        "name": "Azul",
+        "props": [
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "R",
+        "payloadType": "str",
+        "x": 130,
+        "y": 100,
+        "wires": [
+            [
+                "fn_cmd_xiao"
+            ]
+        ]
+    },
+    {
+        "id": "inj_green_xiao",
+        "type": "inject",
+        "z": "b7a2d2d1a9c00101",
+        "name": "Verde",
+        "props": [
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "G",
+        "payloadType": "str",
+        "x": 130,
+        "y": 150,
+        "wires": [
+            [
+                "fn_cmd_xiao"
+            ]
+        ]
+    },
+    {
+        "id": "inj_blue_xiao",
+        "type": "inject",
+        "z": "b7a2d2d1a9c00101",
+        "name": "Rojo",
+        "props": [
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "B",
+        "payloadType": "str",
+        "x": 130,
+        "y": 200,
+        "wires": [
+            [
+                "fn_cmd_xiao"
+            ]
+        ]
+    },
+    {
+        "id": "inj_off_xiao",
+        "type": "inject",
+        "z": "b7a2d2d1a9c00101",
+        "name": "Apagar",
+        "props": [
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "O",
+        "payloadType": "str",
+        "x": 130,
+        "y": 250,
+        "wires": [
+            [
+                "fn_cmd_xiao"
+            ]
+        ]
+    },
+    {
+        "id": "fn_cmd_xiao",
+        "type": "function",
+        "z": "b7a2d2d1a9c00101",
+        "name": "Preparar comando XIAO",
+        "func": "let comando = msg.payload;\n\n// Si llega como buffer desde TCP, convertir a texto\nif (Buffer.isBuffer(comando)) {\n    comando = comando.toString(\"utf8\");\n}\n\ncomando = String(comando).trim().toUpperCase();\n\nlet salida = null;\n\nswitch (comando) {\n    case \"AZUL\":\n    case \"HOMAQ\":\n        salida = \"AZUL\\n\";\n        break;\n\n    case \"VERDE\":\n    case \"SISMICO\":\n    case \"SÍSMICO\":\n        salida = \"VERDE\\n\";\n        break;\n\n    case \"ROJO\":\n    case \"INCENDIO\":\n    case \"ALARMA\":\n        salida = \"ROJO\\n\";\n        break;\n\n    case \"APAGAR\":\n    case \"OFF\":\n    case \"VOLVER\":\n        salida = \"APAGAR\\n\";\n        break;\n\n    default:\n        node.warn(\"Comando no reconocido desde Ignition: \" + comando);\n        return null;\n}\n\nmsg.payload = salida;\nmsg.topic = \"comando_xiao\";\n\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 380,
+        "y": 170,
+        "wires": [
+            [
+                "serial_out_xiao",
+                "debug_cmd_xiao"
+            ]
+        ]
+    },
+    {
+        "id": "serial_out_xiao",
+        "type": "serial out",
+        "z": "b7a2d2d1a9c00101",
+        "name": "Enviar a XIAO USB",
+        "serial": "serial_cfg_xiao",
+        "x": 640,
+        "y": 150,
+        "wires": []
+    },
+    {
+        "id": "debug_cmd_xiao",
+        "type": "debug",
+        "z": "b7a2d2d1a9c00101",
+        "name": "debug comando enviado",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "true",
+        "targetType": "full",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 750,
+        "y": 280,
+        "wires": []
+    },
+    {
+        "id": "a86cd635a0c5271e",
+        "type": "tcp in",
+        "z": "b7a2d2d1a9c00101",
+        "name": "Desde Ignition TCP",
+        "server": "server",
+        "host": "",
+        "port": "9001",
+        "datamode": "stream",
+        "datatype": "buffer",
+        "newline": "\\n",
+        "topic": "",
+        "trim": false,
+        "base64": false,
+        "tls": "",
+        "x": 410,
+        "y": 420,
+        "wires": [
+            [
+                "serial_out_xiao",
+                "debug_cmd_xiao",
+                "fn_cmd_xiao"
+            ]
+        ]
+    },
+    {
+        "id": "serial_cfg_xiao",
+        "type": "serial-port",
+        "name": "XIAO nRF52840 USB",
+        "serialport": "/dev/ttyACM0",
+        "serialbaud": "115200",
+        "databits": "8",
+        "parity": "none",
+        "stopbits": "1",
+        "waitfor": "",
+        "dtr": "none",
+        "rts": "none",
+        "cts": "none",
+        "dsr": "none",
+        "newline": "\\n",
+        "bin": "false",
+        "out": "char",
+        "addchar": "",
+        "responsetimeout": "10000"
+    },
+    {
+        "id": "2ed1551651223877",
+        "type": "global-config",
+        "env": [],
+        "modules": {
+            "node-red-node-serialport": "2.0.3"
+        }
+    }
+]

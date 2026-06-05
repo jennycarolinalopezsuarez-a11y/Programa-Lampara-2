@@ -1,0 +1,1310 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Visor de Inventario Minerguard + carga a MariaDB
+
+Objetivo:
+- Lee el archivo nodes.csv generado por la app principal.
+- Muestra los datos en una tabla Tkinter.
+- Permite editar cada trabajador desde una ventana emergente.
+- Permite seleccionar empresa y proyecto desde listas desplegables.
+- Permite adjuntar fotografía y guardarla como LONG BLOB en MariaDB.
+- Inserta o actualiza la tabla MariaDB `trabajador` usando:
+    node_id  -> id_dispositivo
+    person   -> nombres / apellidos
+    empresa  -> empresa
+    proyecto -> proyecto
+    creation_date o fecha_ingreso -> fecha_ingreso
+    fecha_nacimiento -> fecha_nacimiento
+    fotografia -> archivo de imagen seleccionado desde el programa
+
+Requisito Python:
+    pip install pymysql
+"""
+
+import csv
+import json
+import base64
+from datetime import datetime
+from pathlib import Path
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+
+try:
+    import pymysql
+except ImportError:
+    pymysql = None
+
+
+# =========================================================
+# CONFIGURACIÓN DE MARIA DB
+# Cambia estos datos según tu instalación.
+# Si MariaDB está en el mismo PC del script, usa host="localhost".
+# Si está en el servidor Ubuntu, usa la IP correspondiente, por ejemplo 192.168.60.197.
+# =========================================================
+DB_CONFIG = {
+    "host": "192.168.60.197",
+    "port": 3306,
+    "user": "zuvar",
+    "password": "Zuvar.1505",
+    "database": "minerguard",
+    "charset": "utf8mb4",
+    "cursorclass": None,
+    "autocommit": False,
+    "connect_timeout": 5,
+}
+
+# Nuevo servidor MariaDB con dos IP disponibles.
+# Mantiene usuario, contraseña, puerto, base de datos y charset.
+# IP LAN planta / red 100:
+DB_CONFIG_NUEVO_SERVER_100 = dict(DB_CONFIG)
+DB_CONFIG_NUEVO_SERVER_100["host"] = "192.168.100.105"
+
+# IP red 60:
+DB_CONFIG_NUEVO_SERVER_60 = dict(DB_CONFIG)
+DB_CONFIG_NUEVO_SERVER_60["host"] = "192.168.60.200"
+
+# Compatibilidad con funciones antiguas: "nuevo" usa la IP seleccionada en la interfaz.
+DB_CONFIG_NUEVO_SERVER = dict(DB_CONFIG_NUEVO_SERVER_60)
+
+NUEVO_SERVER_IPS = [
+    "192.168.100.105",
+    "192.168.60.200",
+]
+
+# Si el CSV no trae fecha_ingreso, se usará creation_date como fecha_ingreso.
+USAR_CREATION_DATE_COMO_FECHA_INGRESO = True
+
+EMPRESAS_DISPONIBLES = [
+    "FMT",
+    "Drilltech",
+    "GeoMining",
+    "Minera Sur",
+    "EmpresaX",
+]
+
+PROYECTOS_DISPONIBLES = [
+    "Diamante",
+    "Esmeralda",
+    "Andesita",
+    "Andes Norte",
+    "Diablo Regimiento",
+]
+
+
+class VisorCSV:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Visor Inventario Minerguard - MariaDB Multi IP V5")
+        self.root.geometry("1720x780")
+        self.root.minsize(1250, 560)
+
+        self.ruta_csv = None
+        self.filas_normalizadas = []
+
+        # ==========================================
+        # PANEL SUPERIOR
+        # ==========================================
+        top_frame = ttk.Frame(root, padding=10)
+        top_frame.pack(fill="x")
+
+        ttk.Button(
+            top_frame,
+            text="📂 Abrir archivo nodes.csv",
+            command=self.cargar_csv,
+            width=28,
+        ).pack(side="left")
+
+        ttk.Button(
+            top_frame,
+            text="✏️ Editar trabajador / agregar foto",
+            command=self.abrir_editor_trabajador,
+            width=34,
+        ).pack(side="left", padx=8)
+
+        ttk.Button(
+            top_frame,
+            text="📋 Copiar fila seleccionada",
+            command=self.copiar_fila,
+            width=28,
+        ).pack(side="left", padx=8)
+
+        # ==========================================
+        # PANEL DE SERVIDORES MARIA DB
+        # ==========================================
+        server_frame = ttk.LabelFrame(root, text="Servidores MariaDB", padding=10)
+        server_frame.pack(fill="x", padx=10, pady=(0, 5))
+
+        server_row1 = ttk.Frame(server_frame)
+        server_row1.pack(fill="x", pady=(0, 6))
+
+        server_row2 = ttk.Frame(server_frame)
+        server_row2.pack(fill="x")
+
+        ttk.Label(server_row1, text=f"Servidor actual: {DB_CONFIG['host']}").pack(side="left")
+
+        ttk.Label(server_row1, text="Nuevo server IP:").pack(side="left", padx=(18, 5))
+        self.var_host_nuevo_server = tk.StringVar(value=DB_CONFIG_NUEVO_SERVER_60["host"])
+        self.cbo_host_nuevo_server = ttk.Combobox(
+            server_row1,
+            textvariable=self.var_host_nuevo_server,
+            values=NUEVO_SERVER_IPS,
+            width=18,
+            state="normal",
+        )
+        self.cbo_host_nuevo_server.pack(side="left", padx=(0, 10))
+
+        ttk.Label(
+            server_row1,
+            text="Nuevo servidor por dos redes: 192.168.100.105 y 192.168.60.200",
+            foreground="#555555",
+        ).pack(side="left", padx=10)
+
+        ttk.Button(
+            server_row2,
+            text="🔌 Probar actual",
+            command=lambda: self.probar_conexion("actual"),
+            width=18,
+        ).pack(side="left", padx=4)
+
+        ttk.Button(
+            server_row2,
+            text="🔌 Probar nuevo seleccionado",
+            command=lambda: self.probar_conexion("nuevo"),
+            width=28,
+        ).pack(side="left", padx=4)
+
+        ttk.Button(
+            server_row2,
+            text="🔌 Probar ambos nuevos",
+            command=self.probar_conexion_nuevos_servidores,
+            width=24,
+        ).pack(side="left", padx=4)
+
+        ttk.Button(
+            server_row2,
+            text="💾 Guardar actual",
+            command=lambda: self.guardar_todo_en_mariadb("actual"),
+            width=18,
+        ).pack(side="left", padx=4)
+
+        ttk.Button(
+            server_row2,
+            text="💾 Guardar nuevo seleccionado",
+            command=lambda: self.guardar_todo_en_mariadb("nuevo"),
+            width=28,
+        ).pack(side="left", padx=4)
+
+        ttk.Button(
+            server_row2,
+            text="💾 Guardar ambos nuevos",
+            command=self.guardar_todo_en_nuevos_servidores,
+            width=25,
+        ).pack(side="left", padx=4)
+
+        ttk.Button(
+            server_row2,
+            text="💾 Guardar todos",
+            command=self.guardar_todo_en_todos_los_servidores,
+            width=18,
+        ).pack(side="left", padx=4)
+
+        # ==========================================
+        # PANEL DE DATOS POR DEFECTO
+        # ==========================================
+        default_frame = ttk.LabelFrame(root, text="Valores por defecto para filas sin empresa/proyecto", padding=10)
+        default_frame.pack(fill="x", padx=10, pady=(0, 5))
+
+        ttk.Label(default_frame, text="Empresa:").pack(side="left")
+        self.var_empresa_default = tk.StringVar(value=EMPRESAS_DISPONIBLES[0])
+        self.cbo_empresa_default = ttk.Combobox(
+            default_frame,
+            textvariable=self.var_empresa_default,
+            values=EMPRESAS_DISPONIBLES,
+            width=24,
+            state="readonly",
+        )
+        self.cbo_empresa_default.pack(side="left", padx=(5, 15))
+
+        ttk.Label(default_frame, text="Proyecto:").pack(side="left")
+        self.var_proyecto_default = tk.StringVar(value=PROYECTOS_DISPONIBLES[0])
+        self.cbo_proyecto_default = ttk.Combobox(
+            default_frame,
+            textvariable=self.var_proyecto_default,
+            values=PROYECTOS_DISPONIBLES,
+            width=28,
+            state="readonly",
+        )
+        self.cbo_proyecto_default.pack(side="left", padx=(5, 15))
+
+        ttk.Button(
+            default_frame,
+            text="Aplicar a filas vacías",
+            command=self.aplicar_valores_default_a_filas_vacias,
+            width=24,
+        ).pack(side="left", padx=5)
+
+        ttk.Label(
+            default_frame,
+            text="Puedes ajustar cada trabajador individualmente desde 'Editar trabajador / agregar foto'.",
+            foreground="#555555",
+        ).pack(side="left", padx=10)
+
+        self.lbl_status = ttk.Label(root, text="Esperando archivo...", font=("Segoe UI", 10, "italic"))
+        self.lbl_status.pack(fill="x", padx=12, pady=(0, 5))
+
+        # ==========================================
+        # PANEL CENTRAL / TABLA
+        # ==========================================
+        table_frame = ttk.Frame(root, padding=10)
+        table_frame.pack(fill="both", expand=True)
+
+        scroll_y = ttk.Scrollbar(table_frame, orient="vertical")
+        scroll_x = ttk.Scrollbar(table_frame, orient="horizontal")
+
+        # Columnas visibles. Incluye datos originales del CSV y datos normalizados para MariaDB.
+        self.columnas = (
+            "node_id",
+            "person",
+            "nombres",
+            "apellidos",
+            "empresa",
+            "proyecto",
+            "fecha_ingreso",
+            "fecha_nacimiento",
+            "foto",
+            "devEUI",
+            "appKey",
+            "band_mac",
+            "period_ms",
+            "creation_date",
+        )
+
+        self.tree = ttk.Treeview(
+            table_frame,
+            columns=self.columnas,
+            show="headings",
+            yscrollcommand=scroll_y.set,
+            xscrollcommand=scroll_x.set,
+        )
+
+        scroll_y.config(command=self.tree.yview)
+        scroll_x.config(command=self.tree.xview)
+
+        scroll_y.pack(side="right", fill="y")
+        scroll_x.pack(side="bottom", fill="x")
+        self.tree.pack(fill="both", expand=True)
+
+        cabeceras = {
+            "node_id": "ID Dispositivo",
+            "person": "Trabajador CSV",
+            "nombres": "Nombres",
+            "apellidos": "Apellidos",
+            "empresa": "Empresa",
+            "proyecto": "Proyecto",
+            "fecha_ingreso": "Fecha ingreso",
+            "fecha_nacimiento": "Fecha nacimiento",
+            "foto": "Foto",
+            "devEUI": "DevEUI",
+            "appKey": "AppKey",
+            "band_mac": "MAC Pulsera",
+            "period_ms": "Periodo (ms)",
+            "creation_date": "Fecha creación CSV",
+        }
+
+        for col in self.columnas:
+            self.tree.heading(col, text=cabeceras[col])
+            self.tree.column(col, width=140, anchor="center")
+
+        self.tree.column("person", width=210, anchor="w")
+        self.tree.column("nombres", width=170, anchor="w")
+        self.tree.column("apellidos", width=170, anchor="w")
+        self.tree.column("empresa", width=145, anchor="w")
+        self.tree.column("proyecto", width=180, anchor="w")
+        self.tree.column("foto", width=90, anchor="center")
+        self.tree.column("appKey", width=280)
+
+        # Doble clic para editar la fila.
+        self.tree.bind("<Double-1>", lambda _event: self.abrir_editor_trabajador())
+
+    # =========================================================
+    # UTILIDADES DE NORMALIZACIÓN
+    # =========================================================
+    @staticmethod
+    def valor_limpio(valor):
+        if valor is None:
+            return ""
+        valor = str(valor).strip()
+        if valor.upper() in {"N/A", "NULL", "NONE", "-"}:
+            return ""
+        return valor
+
+    @staticmethod
+    def parsear_nombre_completo(nombre_completo):
+        """
+        Convierte `person` en nombres/apellidos.
+        Heurística pensada para nombres chilenos:
+        - 1 palabra: nombres = palabra, apellidos = ""
+        - 2 palabras: nombres = primera, apellidos = segunda
+        - 3 palabras: nombres = primera, apellidos = últimas dos
+        - 4 o más: nombres = todas menos las últimas dos, apellidos = últimas dos
+
+        Si en tu CSV agregas columnas `nombres` y `apellidos`, esas tendrán prioridad.
+        """
+        nombre_completo = VisorCSV.valor_limpio(nombre_completo)
+        if not nombre_completo:
+            return "", ""
+
+        # Soporte para formato: "Apellidos, Nombres"
+        if "," in nombre_completo:
+            apellidos, nombres = [p.strip() for p in nombre_completo.split(",", 1)]
+            return nombres, apellidos
+
+        partes = nombre_completo.split()
+        if len(partes) == 1:
+            return partes[0], ""
+        if len(partes) == 2:
+            return partes[0], partes[1]
+        if len(partes) == 3:
+            return partes[0], " ".join(partes[1:])
+
+        return " ".join(partes[:-2]), " ".join(partes[-2:])
+
+    @staticmethod
+    def normalizar_fecha(valor):
+        """
+        Devuelve fecha en formato YYYY-MM-DD o None.
+        Acepta:
+        - YYYY-MM-DD
+        - DD/MM/YYYY
+        - DD-MM-YYYY
+        - YYYY/MM/DD
+        - fecha con hora, por ejemplo 2026-05-04 14:30:00
+        """
+        valor = VisorCSV.valor_limpio(valor)
+        if not valor:
+            return None
+
+        # Si viene con hora, dejar solo la fecha.
+        valor = valor.split()[0]
+
+        formatos = ["%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%Y/%m/%d"]
+        for fmt in formatos:
+            try:
+                return datetime.strptime(valor, fmt).date().isoformat()
+            except ValueError:
+                continue
+        return None
+
+    @staticmethod
+    def normalizar_entero(valor):
+        valor = VisorCSV.valor_limpio(valor)
+        if not valor:
+            return None
+        try:
+            return int(float(valor))
+        except ValueError:
+            return None
+
+    def primer_valor(self, row, *campos):
+        """
+        Devuelve el primer campo no vacío de una fila CSV.
+        Permite compatibilidad entre generadores antiguos y el generador V5 LMIC FULL.
+        """
+        for campo in campos:
+            valor = self.valor_limpio(row.get(campo))
+            if valor:
+                return valor
+        return ""
+
+    def normalizar_fila_para_trabajador(self, row):
+        """
+        Toma una fila del CSV y la adapta a la tabla `trabajador`.
+
+        Compatible con:
+        - CSV antiguo: person, creation_date.
+        - CSV V5 LMIC FULL: person_name, created_at, ug65_name, app_port, sketch_path.
+        """
+        id_dispositivo = self.normalizar_entero(
+            self.primer_valor(row, "id_dispositivo", "node_id", "ug65_name", "name")
+        )
+
+        nombres_csv = self.valor_limpio(row.get("nombres"))
+        apellidos_csv = self.valor_limpio(row.get("apellidos"))
+        person = self.primer_valor(row, "person", "person_name", "trabajador", "description", "nombre")
+
+        if nombres_csv or apellidos_csv:
+            nombres = nombres_csv
+            apellidos = apellidos_csv
+        else:
+            nombres, apellidos = self.parsear_nombre_completo(person)
+
+        empresa = self.valor_limpio(row.get("empresa")) or self.valor_limpio(self.var_empresa_default.get()) or None
+        proyecto = self.valor_limpio(row.get("proyecto")) or self.valor_limpio(self.var_proyecto_default.get()) or None
+
+        creation_date = self.primer_valor(row, "creation_date", "created_at", "fecha_creacion")
+
+        fecha_ingreso_raw = row.get("fecha_ingreso")
+        if not self.valor_limpio(fecha_ingreso_raw) and USAR_CREATION_DATE_COMO_FECHA_INGRESO:
+            fecha_ingreso_raw = creation_date
+
+        fecha_ingreso = self.normalizar_fecha(fecha_ingreso_raw)
+        fecha_nacimiento = self.normalizar_fecha(row.get("fecha_nacimiento"))
+
+        return {
+            "id_dispositivo": id_dispositivo,
+            "nombres": nombres or None,
+            "apellidos": apellidos or None,
+            "empresa": empresa,
+            "proyecto": proyecto,
+            "fecha_ingreso": fecha_ingreso,
+            "fecha_nacimiento": fecha_nacimiento,
+            "fotografia": None,
+            "fotografia_path": "",
+            "fotografia_clear": False,
+            "person": person,
+            "devEUI": self.primer_valor(row, "devEUI", "deveui"),
+            "appKey": self.primer_valor(row, "appKey", "appkey"),
+            "band_mac": self.primer_valor(row, "band_mac", "mac_pulsera", "mac_banda"),
+            "period_ms": self.primer_valor(row, "period_ms", "tx_interval_ms"),
+            "creation_date": creation_date,
+        }
+
+
+    # =========================================================
+    # PERSISTENCIA LOCAL Y RECUPERACIÓN DESDE MARIA DB
+    # =========================================================
+    def ruta_cache_local(self):
+        """
+        Archivo auxiliar que queda junto al CSV.
+        Permite que los cambios hechos desde la interfaz no se pierdan al volver a abrir nodes.csv.
+        """
+        if not self.ruta_csv:
+            return None
+        ruta = Path(self.ruta_csv)
+        return ruta.with_name(f"{ruta.stem}_trabajadores_guardado.json")
+
+    def guardar_cache_local(self):
+        """
+        Guarda localmente los datos editados en la interfaz.
+        No reemplaza MariaDB; solo sirve como respaldo para que al reabrir el CSV
+        se mantengan cumpleaños, empresa, proyecto y fotos seleccionadas.
+        """
+        ruta_cache = self.ruta_cache_local()
+        if ruta_cache is None or not self.filas_normalizadas:
+            return False
+
+        trabajadores = {}
+        for fila in self.filas_normalizadas:
+            id_dispositivo = fila.get("id_dispositivo")
+            if id_dispositivo is None:
+                continue
+
+            foto_b64 = None
+            if fila.get("fotografia"):
+                try:
+                    foto_b64 = base64.b64encode(fila["fotografia"]).decode("ascii")
+                except Exception:
+                    foto_b64 = None
+
+            trabajadores[str(id_dispositivo)] = {
+                "id_dispositivo": id_dispositivo,
+                "nombres": fila.get("nombres"),
+                "apellidos": fila.get("apellidos"),
+                "empresa": fila.get("empresa"),
+                "proyecto": fila.get("proyecto"),
+                "fecha_ingreso": fila.get("fecha_ingreso"),
+                "fecha_nacimiento": fila.get("fecha_nacimiento"),
+                "fotografia_path": fila.get("fotografia_path") or "",
+                "fotografia_clear": bool(fila.get("fotografia_clear")),
+                "fotografia_b64": foto_b64,
+            }
+
+        data = {
+            "version": 1,
+            "csv": str(self.ruta_csv),
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+            "trabajadores": trabajadores,
+        }
+
+        try:
+            with open(ruta_cache, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            return True
+        except Exception as e:
+            messagebox.showwarning("Advertencia", f"No se pudo guardar el respaldo local:\n{e}")
+            return False
+
+    def cargar_cache_local(self):
+        ruta_cache = self.ruta_cache_local()
+        if ruta_cache is None or not ruta_cache.exists() or not self.filas_normalizadas:
+            return 0
+
+        try:
+            with open(ruta_cache, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            return 0
+
+        trabajadores = data.get("trabajadores", {})
+        recuperados = 0
+
+        for fila in self.filas_normalizadas:
+            id_dispositivo = fila.get("id_dispositivo")
+            if id_dispositivo is None:
+                continue
+
+            guardado = trabajadores.get(str(id_dispositivo))
+            if not guardado:
+                continue
+
+            for campo in (
+                "nombres",
+                "apellidos",
+                "empresa",
+                "proyecto",
+                "fecha_ingreso",
+                "fecha_nacimiento",
+            ):
+                if campo in guardado:
+                    fila[campo] = guardado.get(campo) or None
+
+            fila["fotografia_path"] = guardado.get("fotografia_path") or ""
+            fila["fotografia_clear"] = bool(guardado.get("fotografia_clear"))
+
+            foto_b64 = guardado.get("fotografia_b64")
+            if foto_b64 and not fila["fotografia_clear"]:
+                try:
+                    fila["fotografia"] = base64.b64decode(foto_b64.encode("ascii"))
+                except Exception:
+                    fila["fotografia"] = None
+
+            recuperados += 1
+
+        return recuperados
+
+    def enriquecer_filas_desde_mariadb(self, destino="actual", silencioso=True):
+        """
+        Si el trabajador ya existe en MariaDB, recupera sus datos.
+        Esto permite que al volver a abrir nodes.csv se vean nuevamente cumpleaños,
+        empresa, proyecto y fotografía guardada.
+        """
+        if not self.filas_normalizadas:
+            return 0
+
+        ids = [fila["id_dispositivo"] for fila in self.filas_normalizadas if fila.get("id_dispositivo") is not None]
+        if not ids:
+            return 0
+
+        try:
+            conn = self.conectar_mariadb(destino)
+            placeholders = ",".join(["%s"] * len(ids))
+            sql = f"""
+                SELECT 
+                    id_dispositivo,
+                    nombres,
+                    apellidos,
+                    empresa,
+                    proyecto,
+                    fecha_ingreso,
+                    fecha_nacimiento,
+                    fotografia
+                FROM trabajador
+                WHERE id_dispositivo IN ({placeholders})
+            """
+
+            with conn.cursor() as cur:
+                cur.execute(sql, ids)
+                rows = cur.fetchall()
+            conn.close()
+
+        except Exception as e:
+            if not silencioso:
+                messagebox.showerror("Error al recuperar datos", f"No se pudo leer trabajadores desde MariaDB:\n{e}")
+            return 0
+
+        por_id = {self.normalizar_entero(row.get("id_dispositivo")): row for row in rows}
+        recuperados = 0
+
+        for fila in self.filas_normalizadas:
+            row = por_id.get(fila.get("id_dispositivo"))
+            if not row:
+                continue
+
+            for campo in ("nombres", "apellidos", "empresa", "proyecto"):
+                valor = row.get(campo)
+                if valor is not None and str(valor).strip() != "":
+                    fila[campo] = valor
+
+            for campo in ("fecha_ingreso", "fecha_nacimiento"):
+                valor = row.get(campo)
+                if valor:
+                    fila[campo] = self.normalizar_fecha(valor)
+
+            foto = row.get("fotografia")
+            if foto:
+                fila["fotografia"] = bytes(foto)
+                fila["fotografia_path"] = f"Recuperada desde MariaDB {destino}"
+                fila["fotografia_clear"] = False
+
+            recuperados += 1
+
+        return recuperados
+
+    # =========================================================
+    # CSV Y TABLA VISUAL
+    # =========================================================
+    def cargar_csv(self):
+        filepath = filedialog.askopenfilename(
+            title="Seleccionar inventario (nodes.csv)",
+            initialdir=r"C:\Users\Innovacion FMT\Documents\Tomas\Minerguard\Prueba Codigos Generador",
+            filetypes=[("Archivos CSV", "*.csv"), ("Todos los archivos", "*.*")],
+        )
+
+        if not filepath:
+            return
+
+        self.tree.delete(*self.tree.get_children())
+        self.filas_normalizadas.clear()
+        self.ruta_csv = filepath
+
+        try:
+            # utf-8-sig evita problemas si el CSV viene con BOM desde Excel.
+            with open(filepath, "r", encoding="utf-8-sig", newline="") as f:
+                reader = csv.DictReader(f)
+                contador = 0
+                omitidos = 0
+
+                for row in reader:
+                    fila = self.normalizar_fila_para_trabajador(row)
+
+                    if fila["id_dispositivo"] is None:
+                        omitidos += 1
+                        continue
+
+                    self.filas_normalizadas.append(fila)
+                    contador += 1
+
+            # 1) Recupera datos ya guardados en MariaDB actual.
+            recuperados_bd_actual = self.enriquecer_filas_desde_mariadb("actual", silencioso=True)
+
+            # 2) Recupera desde las dos IP del nuevo servidor.
+            recuperados_bd_nuevo = 0
+            host_original = self.valor_limpio(self.var_host_nuevo_server.get())
+            for host_nuevo in NUEVO_SERVER_IPS:
+                if host_nuevo and host_nuevo != DB_CONFIG["host"]:
+                    self.var_host_nuevo_server.set(host_nuevo)
+                    recuperados_bd_nuevo += self.enriquecer_filas_desde_mariadb("nuevo", silencioso=True)
+            if host_original:
+                self.var_host_nuevo_server.set(host_original)
+
+            # 3) Recupera los cambios locales guardados junto al CSV.
+            #    Esto evita perder cumpleaños, empresa, proyecto y fotos si se vuelve a abrir el CSV.
+            recuperados_cache = self.cargar_cache_local()
+
+            for i, fila in enumerate(self.filas_normalizadas):
+                self.insertar_o_actualizar_fila_tree(i, fila)
+
+            nombre_archivo = Path(filepath).name
+            mensaje = f"✅ Se cargaron {contador} trabajadores desde '{nombre_archivo}'"
+            if recuperados_bd_actual:
+                mensaje += f" | 🔁 Recuperados desde MariaDB actual: {recuperados_bd_actual}"
+            if recuperados_bd_nuevo:
+                mensaje += f" | 🔁 Recuperados desde MariaDB nuevo: {recuperados_bd_nuevo}"
+            if recuperados_cache:
+                mensaje += f" | 💾 Recuperados desde guardado local: {recuperados_cache}"
+            if omitidos:
+                mensaje += f" | ⚠️ Omitidos por falta de node_id/id_dispositivo: {omitidos}"
+            self.lbl_status.config(text=mensaje)
+
+        except Exception as e:
+            messagebox.showerror("Error de lectura", f"No se pudo leer el archivo CSV:\n{e}")
+
+
+    def insertar_o_actualizar_fila_tree(self, indice, fila):
+        valores = (
+            fila["id_dispositivo"],
+            fila["person"],
+            fila["nombres"] or "",
+            fila["apellidos"] or "",
+            fila["empresa"] or "",
+            fila["proyecto"] or "",
+            fila["fecha_ingreso"] or "",
+            fila["fecha_nacimiento"] or "",
+            self.estado_foto_texto(fila),
+            fila["devEUI"],
+            fila["appKey"],
+            fila["band_mac"],
+            fila["period_ms"],
+            fila["creation_date"],
+        )
+
+        iid = str(indice)
+        if self.tree.exists(iid):
+            self.tree.item(iid, values=valores)
+        else:
+            self.tree.insert("", "end", iid=iid, values=valores)
+
+    @staticmethod
+    def estado_foto_texto(fila):
+        if fila.get("fotografia_clear"):
+            return "Quitar"
+        if fila.get("fotografia"):
+            return "Sí"
+        return "No"
+
+    def obtener_indice_seleccionado(self):
+        seleccion = self.tree.selection()
+        if not seleccion:
+            return None
+        try:
+            return int(seleccion[0])
+        except ValueError:
+            return None
+
+    def aplicar_valores_default_a_filas_vacias(self):
+        if not self.filas_normalizadas:
+            messagebox.showwarning("Atención", "Primero debes cargar un archivo CSV válido.")
+            return
+
+        empresa_default = self.valor_limpio(self.var_empresa_default.get()) or None
+        proyecto_default = self.valor_limpio(self.var_proyecto_default.get()) or None
+        cambios = 0
+
+        for i, fila in enumerate(self.filas_normalizadas):
+            cambio_fila = False
+            if not fila.get("empresa"):
+                fila["empresa"] = empresa_default
+                cambio_fila = True
+            if not fila.get("proyecto"):
+                fila["proyecto"] = proyecto_default
+                cambio_fila = True
+            if cambio_fila:
+                cambios += 1
+                self.insertar_o_actualizar_fila_tree(i, fila)
+
+        self.guardar_cache_local()
+        self.lbl_status.config(text=f"✅ Valores por defecto aplicados a {cambios} fila(s) vacía(s).")
+
+    # =========================================================
+    # EDITOR DE TRABAJADOR
+    # =========================================================
+    def abrir_editor_trabajador(self):
+        indice = self.obtener_indice_seleccionado()
+        if indice is None or indice < 0 or indice >= len(self.filas_normalizadas):
+            messagebox.showwarning("Atención", "Primero debes seleccionar una fila de la tabla.")
+            return
+
+        fila = self.filas_normalizadas[indice]
+
+        win = tk.Toplevel(self.root)
+        win.title(f"Editar trabajador - ID dispositivo {fila['id_dispositivo']}")
+        win.geometry("560x480")
+        win.resizable(False, False)
+        win.transient(self.root)
+        win.grab_set()
+
+        cont = ttk.Frame(win, padding=15)
+        cont.pack(fill="both", expand=True)
+
+        vars_form = {
+            "nombres": tk.StringVar(value=fila.get("nombres") or ""),
+            "apellidos": tk.StringVar(value=fila.get("apellidos") or ""),
+            "empresa": tk.StringVar(value=fila.get("empresa") or EMPRESAS_DISPONIBLES[0]),
+            "proyecto": tk.StringVar(value=fila.get("proyecto") or PROYECTOS_DISPONIBLES[0]),
+            "fecha_ingreso": tk.StringVar(value=fila.get("fecha_ingreso") or ""),
+            "fecha_nacimiento": tk.StringVar(value=fila.get("fecha_nacimiento") or ""),
+            "foto_path": tk.StringVar(value=fila.get("fotografia_path") or "Sin fotografía seleccionada"),
+        }
+
+        ttk.Label(cont, text="ID dispositivo:").grid(row=0, column=0, sticky="w", pady=5)
+        ttk.Label(cont, text=str(fila["id_dispositivo"]), font=("Segoe UI", 10, "bold")).grid(
+            row=0, column=1, sticky="w", pady=5
+        )
+
+        ttk.Label(cont, text="Trabajador CSV:").grid(row=1, column=0, sticky="w", pady=5)
+        ttk.Label(cont, text=fila.get("person") or "-", foreground="#555555").grid(row=1, column=1, sticky="w", pady=5)
+
+        ttk.Label(cont, text="Nombres:").grid(row=2, column=0, sticky="w", pady=5)
+        ttk.Entry(cont, textvariable=vars_form["nombres"], width=42).grid(row=2, column=1, sticky="ew", pady=5)
+
+        ttk.Label(cont, text="Apellidos:").grid(row=3, column=0, sticky="w", pady=5)
+        ttk.Entry(cont, textvariable=vars_form["apellidos"], width=42).grid(row=3, column=1, sticky="ew", pady=5)
+
+        ttk.Label(cont, text="Empresa:").grid(row=4, column=0, sticky="w", pady=5)
+        ttk.Combobox(
+            cont,
+            textvariable=vars_form["empresa"],
+            values=EMPRESAS_DISPONIBLES,
+            width=39,
+            state="readonly",
+        ).grid(row=4, column=1, sticky="ew", pady=5)
+
+        ttk.Label(cont, text="Proyecto:").grid(row=5, column=0, sticky="w", pady=5)
+        ttk.Combobox(
+            cont,
+            textvariable=vars_form["proyecto"],
+            values=PROYECTOS_DISPONIBLES,
+            width=39,
+            state="readonly",
+        ).grid(row=5, column=1, sticky="ew", pady=5)
+
+        ttk.Label(cont, text="Fecha ingreso:").grid(row=6, column=0, sticky="w", pady=5)
+        ttk.Entry(cont, textvariable=vars_form["fecha_ingreso"], width=42).grid(row=6, column=1, sticky="ew", pady=5)
+
+        ttk.Label(cont, text="Fecha nacimiento:").grid(row=7, column=0, sticky="w", pady=5)
+        ttk.Entry(cont, textvariable=vars_form["fecha_nacimiento"], width=42).grid(row=7, column=1, sticky="ew", pady=5)
+
+        ttk.Label(cont, text="Formato fecha:").grid(row=8, column=0, sticky="w", pady=3)
+        ttk.Label(cont, text="YYYY-MM-DD o DD/MM/YYYY", foreground="#555555").grid(row=8, column=1, sticky="w", pady=3)
+
+        ttk.Separator(cont).grid(row=9, column=0, columnspan=2, sticky="ew", pady=12)
+
+        ttk.Label(cont, text="Fotografía:").grid(row=10, column=0, sticky="w", pady=5)
+        lbl_foto = ttk.Label(cont, textvariable=vars_form["foto_path"], foreground="#555555", wraplength=360)
+        lbl_foto.grid(row=10, column=1, sticky="w", pady=5)
+
+        def seleccionar_foto():
+            ruta = filedialog.askopenfilename(
+                title="Seleccionar fotografía del trabajador",
+                filetypes=[
+                    ("Imágenes", "*.jpg *.jpeg *.png *.bmp *.gif *.webp"),
+                    ("Todos los archivos", "*.*"),
+                ],
+            )
+            if not ruta:
+                return
+            try:
+                with open(ruta, "rb") as img_file:
+                    datos = img_file.read()
+                if len(datos) == 0:
+                    messagebox.showwarning("Imagen vacía", "El archivo seleccionado no contiene datos.")
+                    return
+                fila["fotografia"] = datos
+                fila["fotografia_path"] = ruta
+                fila["fotografia_clear"] = False
+                vars_form["foto_path"].set(Path(ruta).name)
+            except Exception as e:
+                messagebox.showerror("Error al leer imagen", f"No se pudo cargar la fotografía:\n{e}")
+
+        def quitar_foto():
+            respuesta = messagebox.askyesno(
+                "Quitar fotografía",
+                "¿Quieres dejar marcada esta fila para borrar la fotografía existente en MariaDB?",
+            )
+            if not respuesta:
+                return
+            fila["fotografia"] = None
+            fila["fotografia_path"] = ""
+            fila["fotografia_clear"] = True
+            vars_form["foto_path"].set("Se quitará la foto en MariaDB")
+
+        btn_foto_frame = ttk.Frame(cont)
+        btn_foto_frame.grid(row=11, column=1, sticky="w", pady=5)
+
+        ttk.Button(btn_foto_frame, text="📷 Seleccionar foto", command=seleccionar_foto, width=24).pack(side="left")
+        ttk.Button(btn_foto_frame, text="🗑️ Quitar foto", command=quitar_foto, width=18).pack(side="left", padx=8)
+
+        ttk.Separator(cont).grid(row=12, column=0, columnspan=2, sticky="ew", pady=12)
+
+        def guardar_cambios():
+            fecha_ingreso = self.normalizar_fecha(vars_form["fecha_ingreso"].get())
+            fecha_nacimiento = self.normalizar_fecha(vars_form["fecha_nacimiento"].get())
+
+            if self.valor_limpio(vars_form["fecha_ingreso"].get()) and fecha_ingreso is None:
+                messagebox.showwarning(
+                    "Fecha inválida",
+                    "La fecha de ingreso no tiene un formato válido. Usa YYYY-MM-DD o DD/MM/YYYY.",
+                )
+                return
+
+            if self.valor_limpio(vars_form["fecha_nacimiento"].get()) and fecha_nacimiento is None:
+                messagebox.showwarning(
+                    "Fecha inválida",
+                    "La fecha de nacimiento no tiene un formato válido. Usa YYYY-MM-DD o DD/MM/YYYY.",
+                )
+                return
+
+            fila["nombres"] = self.valor_limpio(vars_form["nombres"].get()) or None
+            fila["apellidos"] = self.valor_limpio(vars_form["apellidos"].get()) or None
+            fila["empresa"] = self.valor_limpio(vars_form["empresa"].get()) or None
+            fila["proyecto"] = self.valor_limpio(vars_form["proyecto"].get()) or None
+            fila["fecha_ingreso"] = fecha_ingreso
+            fila["fecha_nacimiento"] = fecha_nacimiento
+
+            self.insertar_o_actualizar_fila_tree(indice, fila)
+            self.guardar_cache_local()
+            self.lbl_status.config(text=f"✅ Cambios aplicados y guardados localmente al ID dispositivo {fila['id_dispositivo']}.")
+            win.destroy()
+
+        bottom = ttk.Frame(cont)
+        bottom.grid(row=13, column=0, columnspan=2, sticky="e", pady=10)
+
+        ttk.Button(bottom, text="Cancelar", command=win.destroy, width=16).pack(side="right", padx=5)
+        ttk.Button(bottom, text="Guardar cambios", command=guardar_cambios, width=22).pack(side="right", padx=5)
+
+        cont.columnconfigure(1, weight=1)
+
+    def copiar_fila(self):
+        indice = self.obtener_indice_seleccionado()
+        if indice is None or indice < 0 or indice >= len(self.filas_normalizadas):
+            messagebox.showwarning("Atención", "Primero debes hacer clic en una fila de la tabla para copiarla.")
+            return
+
+        fila = self.filas_normalizadas[indice]
+
+        texto_copiar = (
+            f"ID dispositivo: {fila['id_dispositivo']}\n"
+            f"Trabajador CSV: {fila['person']}\n"
+            f"Nombres: {fila['nombres'] or ''}\n"
+            f"Apellidos: {fila['apellidos'] or ''}\n"
+            f"Empresa: {fila['empresa'] or ''}\n"
+            f"Proyecto: {fila['proyecto'] or ''}\n"
+            f"Fecha ingreso: {fila['fecha_ingreso'] or ''}\n"
+            f"Fecha nacimiento: {fila['fecha_nacimiento'] or ''}\n"
+            f"Fotografía: {self.estado_foto_texto(fila)}\n"
+            f"DevEUI: {fila['devEUI']}\n"
+            f"AppKey: {fila['appKey']}\n"
+            f"MAC Pulsera: {fila['band_mac']}\n"
+            f"Generado el: {fila['creation_date']}"
+        )
+
+        self.root.clipboard_clear()
+        self.root.clipboard_append(texto_copiar)
+        messagebox.showinfo("Copiado", "Datos copiados al portapapeles.")
+
+    # =========================================================
+    # MARIA DB
+    # =========================================================
+    def nombre_destino(self, destino="actual"):
+        if destino == "actual":
+            return "servidor actual"
+        if destino == "nuevo_100":
+            return "nuevo server 192.168.100.105"
+        if destino == "nuevo_60":
+            return "nuevo server 192.168.60.200"
+        if destino == "nuevo":
+            return f"nuevo server seleccionado {self.valor_limpio(self.var_host_nuevo_server.get())}"
+        return str(destino)
+
+    def obtener_config_mariadb(self, destino="actual"):
+        """
+        destino:
+        - "actual": usa DB_CONFIG, actualmente 192.168.60.197.
+        - "nuevo": usa la IP seleccionada en la interfaz.
+        - "nuevo_100": usa 192.168.100.105.
+        - "nuevo_60": usa 192.168.60.200.
+        """
+        if destino == "actual":
+            config = dict(DB_CONFIG)
+        elif destino == "nuevo_100":
+            config = dict(DB_CONFIG_NUEVO_SERVER_100)
+        elif destino == "nuevo_60":
+            config = dict(DB_CONFIG_NUEVO_SERVER_60)
+        elif destino == "nuevo":
+            config = dict(DB_CONFIG_NUEVO_SERVER)
+            host_nuevo = self.valor_limpio(self.var_host_nuevo_server.get())
+            if not host_nuevo or "XXX" in host_nuevo:
+                raise RuntimeError("Debes escribir o seleccionar la IP real del nuevo servidor MariaDB.")
+            config["host"] = host_nuevo
+        else:
+            raise RuntimeError(f"Destino MariaDB no reconocido: {destino}")
+
+        config["cursorclass"] = pymysql.cursors.DictCursor
+        return config
+
+    def conectar_mariadb(self, destino="actual"):
+        if pymysql is None:
+            raise RuntimeError("Falta instalar pymysql. Ejecuta: pip install pymysql")
+
+        config = self.obtener_config_mariadb(destino)
+        return pymysql.connect(**config)
+
+    def probar_conexion(self, destino="actual"):
+        try:
+            config = self.obtener_config_mariadb(destino)
+            conn = pymysql.connect(**config)
+            with conn.cursor() as cur:
+                cur.execute("SELECT DATABASE() AS db_actual, VERSION() AS version, @@hostname AS host_mariadb")
+                row = cur.fetchone()
+            conn.close()
+
+            nombre_destino = self.nombre_destino(destino)
+            messagebox.showinfo(
+                "Conexión correcta",
+                f"Conectado al {nombre_destino}.\n"
+                f"IP configurada: {config['host']}\n"
+                f"Base de datos: {row['db_actual']}\n"
+                f"Host MariaDB: {row['host_mariadb']}\n"
+                f"Versión: {row['version']}",
+            )
+        except Exception as e:
+            nombre_destino = self.nombre_destino(destino)
+            messagebox.showerror(
+                "Error de conexión",
+                f"No se pudo conectar al {nombre_destino}:\n{e}",
+            )
+
+    def probar_conexion_nuevos_servidores(self):
+        resultados = []
+        for destino in ("nuevo_100", "nuevo_60"):
+            try:
+                config = self.obtener_config_mariadb(destino)
+                conn = pymysql.connect(**config)
+                with conn.cursor() as cur:
+                    cur.execute("SELECT DATABASE() AS db_actual, VERSION() AS version, @@hostname AS host_mariadb")
+                    row = cur.fetchone()
+                conn.close()
+                resultados.append(
+                    f"✅ {self.nombre_destino(destino)} ({config['host']}) OK\n"
+                    f"   DB: {row['db_actual']} | Host: {row['host_mariadb']} | Versión: {row['version']}"
+                )
+            except Exception as e:
+                resultados.append(f"❌ {self.nombre_destino(destino)} ERROR\n   {e}")
+
+        mensaje = "\n\n".join(resultados)
+        messagebox.showinfo("Prueba de ambos nuevos servidores", mensaje)
+
+    def asegurar_tabla_trabajador(self, cur):
+        """
+        Crea la tabla trabajador si no existe y agrega columnas mínimas si faltan.
+        Esto ayuda cuando el nuevo servidor está recién instalado.
+        """
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS trabajador (
+            id_dispositivo INT NOT NULL,
+            nombres VARCHAR(120) NULL,
+            apellidos VARCHAR(120) NULL,
+            empresa VARCHAR(120) NULL,
+            proyecto VARCHAR(120) NULL,
+            fecha_ingreso DATE NULL,
+            fecha_nacimiento DATE NULL,
+            fotografia LONGBLOB NULL,
+            fecha_actualizacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (id_dispositivo)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """)
+
+        cur.execute("SHOW COLUMNS FROM trabajador")
+        rows = cur.fetchall()
+        existentes = set()
+        for row in rows:
+            if isinstance(row, dict):
+                existentes.add(row.get("Field"))
+            else:
+                existentes.add(row[0])
+
+        columnas_requeridas = {
+            "id_dispositivo": "INT NOT NULL",
+            "nombres": "VARCHAR(120) NULL",
+            "apellidos": "VARCHAR(120) NULL",
+            "empresa": "VARCHAR(120) NULL",
+            "proyecto": "VARCHAR(120) NULL",
+            "fecha_ingreso": "DATE NULL",
+            "fecha_nacimiento": "DATE NULL",
+            "fotografia": "LONGBLOB NULL",
+            "fecha_actualizacion": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP",
+        }
+
+        for columna, definicion in columnas_requeridas.items():
+            if columna not in existentes:
+                try:
+                    cur.execute(f"ALTER TABLE trabajador ADD COLUMN {columna} {definicion}")
+                except Exception:
+                    pass
+
+        try:
+            cur.execute("SHOW INDEX FROM trabajador WHERE Column_name = 'id_dispositivo'")
+            indexes = cur.fetchall()
+            tiene_unico = False
+            for idx in indexes:
+                non_unique = idx.get("Non_unique") if isinstance(idx, dict) else idx[1]
+                if int(non_unique) == 0:
+                    tiene_unico = True
+                    break
+            if not tiene_unico:
+                cur.execute("ALTER TABLE trabajador ADD UNIQUE KEY uk_trabajador_id_dispositivo (id_dispositivo)")
+        except Exception:
+            pass
+
+    def guardar_todo_en_mariadb(self, destino="actual", mostrar_mensaje=True):
+        if not self.filas_normalizadas:
+            messagebox.showwarning("Atención", "Primero debes cargar un archivo CSV válido.")
+            return False, "No hay filas cargadas."
+
+        sql = """
+        INSERT INTO trabajador
+            (id_dispositivo, nombres, apellidos, empresa, proyecto, fecha_ingreso, fecha_nacimiento, fotografia)
+        VALUES
+            (%s, %s, %s, %s, %s, %s, %s, %s)
+        ON DUPLICATE KEY UPDATE
+            nombres = VALUES(nombres),
+            apellidos = VALUES(apellidos),
+            empresa = VALUES(empresa),
+            proyecto = VALUES(proyecto),
+            fecha_ingreso = VALUES(fecha_ingreso),
+            fecha_nacimiento = VALUES(fecha_nacimiento),
+            fotografia = CASE
+                WHEN %s = 1 THEN NULL
+                WHEN VALUES(fotografia) IS NOT NULL THEN VALUES(fotografia)
+                ELSE fotografia
+            END
+        """
+
+        conn = None
+        try:
+            config = self.obtener_config_mariadb(destino)
+            conn = pymysql.connect(**config)
+
+            insertados_o_actualizados = 0
+            omitidos = 0
+            fotos_cargadas = 0
+            fotos_quitadas = 0
+
+            with conn.cursor() as cur:
+                self.asegurar_tabla_trabajador(cur)
+
+                for fila in self.filas_normalizadas:
+                    if fila["id_dispositivo"] is None:
+                        omitidos += 1
+                        continue
+
+                    fotografia_bytes = fila.get("fotografia")
+                    quitar_foto = 1 if fila.get("fotografia_clear") else 0
+
+                    if fotografia_bytes:
+                        fotos_cargadas += 1
+                    if quitar_foto:
+                        fotos_quitadas += 1
+
+                    cur.execute(
+                        sql,
+                        (
+                            fila["id_dispositivo"],
+                            fila["nombres"],
+                            fila["apellidos"],
+                            fila["empresa"],
+                            fila["proyecto"],
+                            fila["fecha_ingreso"],
+                            fila["fecha_nacimiento"],
+                            fotografia_bytes,
+                            quitar_foto,
+                        ),
+                    )
+                    insertados_o_actualizados += 1
+
+            conn.commit()
+            conn.close()
+
+            # También guarda respaldo local para que al reabrir el CSV no se pierdan los cambios.
+            self.guardar_cache_local()
+
+            nombre_destino = self.nombre_destino(destino)
+            mensaje = (
+                f"✅ Tabla trabajador actualizada en {nombre_destino} ({config['host']}): "
+                f"{insertados_o_actualizados} registros insertados/actualizados."
+            )
+            if fotos_cargadas:
+                mensaje += f"\n📷 Fotografías cargadas/actualizadas: {fotos_cargadas}."
+            if fotos_quitadas:
+                mensaje += f"\n🗑️ Fotografías marcadas para quitar: {fotos_quitadas}."
+            if omitidos:
+                mensaje += f"\n⚠️ Omitidos: {omitidos} registros sin id_dispositivo."
+
+            self.lbl_status.config(text=mensaje.replace("\n", " | "))
+            if mostrar_mensaje:
+                messagebox.showinfo("Proceso completado", mensaje)
+            return True, mensaje
+
+        except Exception as e:
+            try:
+                if conn:
+                    conn.rollback()
+                    conn.close()
+            except Exception:
+                pass
+
+            nombre_destino = self.nombre_destino(destino)
+            mensaje = f"❌ No se pudo actualizar la tabla trabajador en {nombre_destino}:\n{e}"
+
+            if mostrar_mensaje:
+                messagebox.showerror("Error al guardar", mensaje)
+            return False, mensaje
+
+    def guardar_todo_en_ambos_servidores(self):
+        """
+        Compatibilidad: guarda en servidor actual + nuevo seleccionado.
+        """
+        if not self.filas_normalizadas:
+            messagebox.showwarning("Atención", "Primero debes cargar un archivo CSV válido.")
+            return
+
+        ok_actual, msg_actual = self.guardar_todo_en_mariadb("actual", mostrar_mensaje=False)
+        ok_nuevo, msg_nuevo = self.guardar_todo_en_mariadb("nuevo", mostrar_mensaje=False)
+
+        mensaje = "Resultado de guardado en servidor actual + nuevo seleccionado:\n\n"
+        mensaje += f"{msg_actual}\n\n{msg_nuevo}"
+
+        self.lbl_status.config(text=mensaje.replace("\n", " | "))
+        if ok_actual and ok_nuevo:
+            messagebox.showinfo("Proceso completado", mensaje)
+        else:
+            messagebox.showwarning("Proceso con observaciones", mensaje)
+
+    def guardar_todo_en_nuevos_servidores(self):
+        """
+        Guarda en las dos IP del nuevo servidor:
+        - 192.168.100.105
+        - 192.168.60.200
+        """
+        if not self.filas_normalizadas:
+            messagebox.showwarning("Atención", "Primero debes cargar un archivo CSV válido.")
+            return
+
+        ok_100, msg_100 = self.guardar_todo_en_mariadb("nuevo_100", mostrar_mensaje=False)
+        ok_60, msg_60 = self.guardar_todo_en_mariadb("nuevo_60", mostrar_mensaje=False)
+
+        mensaje = "Resultado de guardado en ambos nuevos servidores:\n\n"
+        mensaje += f"{msg_100}\n\n{msg_60}"
+
+        self.lbl_status.config(text=mensaje.replace("\n", " | "))
+        if ok_100 and ok_60:
+            messagebox.showinfo("Proceso completado", mensaje)
+        else:
+            messagebox.showwarning("Proceso con observaciones", mensaje)
+
+    def guardar_todo_en_todos_los_servidores(self):
+        """
+        Guarda en servidor actual y en las dos IP del nuevo servidor.
+        """
+        if not self.filas_normalizadas:
+            messagebox.showwarning("Atención", "Primero debes cargar un archivo CSV válido.")
+            return
+
+        resultados = [
+            self.guardar_todo_en_mariadb("actual", mostrar_mensaje=False),
+            self.guardar_todo_en_mariadb("nuevo_100", mostrar_mensaje=False),
+            self.guardar_todo_en_mariadb("nuevo_60", mostrar_mensaje=False),
+        ]
+
+        mensaje = "Resultado de guardado en todos los servidores:\n\n"
+        mensaje += "\n\n".join(msg for _ok, msg in resultados)
+
+        self.lbl_status.config(text=mensaje.replace("\n", " | "))
+        if all(ok for ok, _msg in resultados):
+            messagebox.showinfo("Proceso completado", mensaje)
+        else:
+            messagebox.showwarning("Proceso con observaciones", mensaje)
+
+
+if __name__ == "__main__":
+    root = tk.Tk()
+
+    style = ttk.Style(root)
+    try:
+        style.theme_use("vista")
+    except Exception:
+        pass
+
+    app = VisorCSV(root)
+    root.mainloop()

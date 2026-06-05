@@ -1,0 +1,1756 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Minerguard Generator App
+- App de escritorio simple para generar sketches .ino para Heltec T114
+- Usa como plantilla base Minerguard_FinalPrueba funcional con display.cpp/display.h
+- Genera DevEUI y AppKey únicos por cada sketch, validando contra nodes.csv
+- Guarda la fecha y hora de creación en el CSV.
+- Genera además un CSV compatible con Bulk Import del UG65 Milesight.
+"""
+
+from __future__ import annotations
+
+import csv
+import os
+import re
+import secrets
+import datetime
+from pathlib import Path
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+
+HEX_RE = re.compile(r"^[0-9A-Fa-f]+$")
+MAC_RE = re.compile(r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
+
+# =======================================================================
+# PLANTILLA BASE: Placafusionada.ino con soporte LoRaWAN No Bloqueante
+# =======================================================================
+SKETCH_TEMPLATE = r'''
+
+/********************************************************************
+ * Minerguard auto-generado para Heltec T114
+ * Plantilla base: FinalPrueba con BPM grande + corazon animado fluido
+ * Node ID: {NODE_ID}
+ * Persona: {PERSON_NAME}
+ * Banda: {BAND_NAME}
+ * MAC Banda: {BAND_MAC}
+ ********************************************************************/
+
+#include <Arduino.h>
+#include <SPI.h>
+#include <Adafruit_TinyUSB.h>
+#include <bluefruit.h>
+#include "heltec_nrf_lorawan.h"
+#include "display.h"
+
+#include <Adafruit_GFX.h>
+#include <Adafruit_ST7789.h>
+extern Adafruit_ST7789 tft;
+
+// ── Timer de hardware para la animación del corazón (20ms = 50Hz) ─────────────
+
+/* =========================================================
+   CREDENCIALES OTAA LORAWAN
+   ========================================================= */
+uint8_t devEui[] = { {DEVEUI} };
+uint8_t appEui[] = { {APPEUI} };
+uint8_t appKey[] = { {APPKEY} };
+uint8_t nwkSKey[] = { 0x15, 0xb1, 0xd0, 0xef, 0xa4, 0x63, 0xdf, 0xbe, 0x3d, 0x11, 0x18, 0x1e, 0x1e, 0xc7, 0xda, 0x85 };
+uint8_t appSKey[] = { 0xd7, 0x2c, 0x78, 0x75, 0x8c, 0xdc, 0xca, 0xbf, 0x55, 0xee, 0x4a, 0x77, 0x8d, 0x16, 0xef, 0x67 };
+uint32_t devAddr =  ( uint32_t )0x007e6ae1;
+
+LoRaMacRegion_t loraWanRegion = LORAMAC_REGION_US915;
+DeviceClass_t   loraWanClass  = CLASS_A;
+
+bool overTheAirActivation = true;
+bool loraWanAdr = true;
+bool isTxConfirmed = false;
+uint8_t appPort = 2;
+uint8_t confirmedNbTrials = 2;
+
+uint32_t appTxDutyCycle = {APP_TX_MS};
+uint16_t userChannelsMask[6] = { 0xFF00, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000 };
+
+/* =========================================================
+   HARDWARE / APP
+   ========================================================= */
+#define BUTTON_PIN 42
+
+static const char PERSON_NAME[]     = "{PERSON_NAME}";
+static const char NODE_LABEL[]      = "{BLE_SELF_NAME}";
+static const char BAND_MAC_TARGET[] = "{BAND_MAC}";  // Conexión BLE estricta: solo esta MAC.
+
+static const uint8_t MINERGUARD_UUID[16] = {
+  0xE2, 0xC5, 0x6D, 0xB5, 0xDF, 0xFB, 0x48, 0xD2, 0xB0, 0x60, 0xD0, 0xF5, 0xA7, 0x10, 0x96, 0xE0
+};
+
+/* =========================================================
+   BLE HEART RATE / BATTERY
+   ========================================================= */
+BLEClientService svcHR(UUID16_SVC_HEART_RATE);
+BLEClientCharacteristic chrHR(UUID16_CHR_HEART_RATE_MEASUREMENT);
+BLEClientService svcBAT(UUID16_SVC_BATTERY);
+BLEClientCharacteristic chrBAT(UUID16_CHR_BATTERY_LEVEL);
+
+/* =========================================================
+   ESTRUCTURA DE BEACONS
+   Convencion: Major = nivel / piso, Minor = PK
+   ========================================================= */
+struct BeaconReading {
+  bool valid;
+  uint16_t major;
+  uint16_t minor;
+  int8_t rssi;
+  uint32_t seenAt;
+};
+
+BeaconReading topBeacons[3] = { {false,0,0,-127,0}, {false,0,0,-127,0}, {false,0,0,-127,0} };
+BeaconReading snapshotA[3]  = { {false,0,0,-127,0}, {false,0,0,-127,0}, {false,0,0,-127,0} };
+BeaconReading snapshotB[3]  = { {false,0,0,-127,0}, {false,0,0,-127,0}, {false,0,0,-127,0} };
+
+volatile uint32_t lastPeriodicSend = 0;
+volatile bool snapshotATaken = false;
+static const uint32_t BEACON_TIMEOUT_MS = 15000;
+
+/* =========================================================
+   VARIABLES DE ESTADO
+   ========================================================= */
+volatile bool bleConnected = false;
+volatile bool hrValid = false;
+volatile uint8_t hrBpm = 0;
+volatile bool bandBatValid = false;
+volatile uint8_t bandBatPct = 0;
+
+volatile bool panicActive = false;
+volatile bool isPressingButton = false; 
+bool buttonPrev = false;
+uint32_t buttonPressStart = 0;
+bool buttonHeld = false;
+
+uint32_t lastScanKick = 0;
+uint32_t panicEndMs = 0;
+bool requestImmediateTx = false;
+
+static const uint32_t TX_INTERVAL_MS    = {APP_TX_MS};
+static const uint32_t HOLD_TIME_MS      = 1500;
+static const uint32_t PANIC_DURATION_MS = 60000;
+
+/* =========================================================
+   SISTEMA DE PANTALLA INTELIGENTE
+   ========================================================= */
+char scrLine1[32] = "Iniciando";
+char scrLine2[32] = "Buscando Beacons";
+char scrLine3[32] = "{PERSON_NAME}";
+uint16_t scrColor = CLR_CYAN;
+volatile bool screenNeedsUpdate = true;
+
+void requestScreenUpdate(const char* l1, const char* l2, const char* l3, uint16_t color) {
+  if (strncmp(scrLine1, l1, 31) == 0 && strncmp(scrLine2, l2, 31) == 0 && strncmp(scrLine3, l3, 31) == 0 && scrColor == color) return;
+  strncpy(scrLine1, l1, sizeof(scrLine1) - 1);
+  strncpy(scrLine2, l2, sizeof(scrLine2) - 1);
+  strncpy(scrLine3, l3, sizeof(scrLine3) - 1);
+  scrColor = color;
+  screenNeedsUpdate = true;
+}
+
+static void screen_text(const char* l1, const char* l2, const char* l3, uint16_t color) {
+  bool showHeart = bleConnected && hrValid && !panicActive;
+
+  // displayMainScreen ahora usa la misma idea del codigo Placaheltec:
+  // BPM grande arriba, corazon arriba a la derecha y beacons/estado abajo.
+  displayMainScreen(l1, l2, l3, color, showHeart);
+
+  // Overlay inferior solo cuando corresponde. Si no hay pánico ni presión,
+  // NO se borra la zona inferior, porque ahí quedó dibujado el PK/beacon.
+  if (panicActive) {
+    tft.fillRect(0, 68, 240, 67, CLR_RED);
+    tft.setTextColor(CLR_WHITE);
+    tft.setTextSize(3);
+    tft.setCursor(34, 80);
+    tft.print("PANICO");
+  } else if (isPressingButton) {
+    tft.fillRect(0, 68, 240, 67, CLR_ORANGE);
+    tft.setTextColor(CLR_WHITE);
+    tft.setTextSize(1);
+    tft.setCursor(18, 92);
+    tft.print("Mantenga presionado para panico");
+  }
+}
+
+void updateDisplayPosition() {
+  if (panicActive) return;
+
+  char l1[32] = "Buscando...";
+  char l2[32] = "";
+  char l3[32]; snprintf(l3, sizeof(l3), "%s", PERSON_NAME);
+  uint16_t color = CLR_CYAN;
+
+  // Convencion de posicionamiento MinerGuard:
+  //   Major = nivel / piso / sector principal
+  //   Minor = PK dentro del nivel
+  // La Heltec NO fuerza estos valores: los lee desde el iBeacon detectado.
+  if (bleConnected && hrValid) {
+    snprintf(l1, sizeof(l1), "HR: %u bpm", hrBpm);
+    color = CLR_LIME;
+    if (topBeacons[0].valid) snprintf(l2, sizeof(l2), "PK ACTUAL: %u", topBeacons[0].minor);
+    else snprintf(l2, sizeof(l2), "PK: Fuera de rango");
+  } else {
+    if (topBeacons[0].valid) {
+      snprintf(l1, sizeof(l1), "PK ACTUAL");
+      snprintf(l2, sizeof(l2), "%u", topBeacons[0].minor);
+    } else {
+      snprintf(l1, sizeof(l1), "Minerguard");
+      snprintf(l2, sizeof(l2), "Escaneando...");
+    }
+  }
+  requestScreenUpdate(l1, l2, l3, color);
+}
+
+/* =========================================================
+   PARSER Y AUXILIARES BLE (INTACTO)
+   ========================================================= */
+static uint8_t parse_hr_2a37(const uint8_t* data, uint16_t len) {
+  if (len < 2) return 0;
+  uint8_t flags = data[0];
+  if ((flags & 0x01) == 0) return data[1];
+  if (len >= 3) {
+    uint16_t hr = (uint16_t)data[1] | ((uint16_t)data[2] << 8);
+    return (hr > 255) ? 255 : (uint8_t)hr;
+  }
+  return 0;
+}
+
+static bool uuidMatches(const uint8_t* uuid16) { return memcmp(uuid16, MINERGUARD_UUID, 16) == 0; }
+static uint8_t encodeRSSI(int8_t rssi) { int16_t v = (int16_t)rssi + 128; if (v < 0) v = 0; if (v > 255) v = 255; return (uint8_t)v; }
+
+/* =========================================================
+   LOGICA BEACONS (INTACTO)
+   ========================================================= */
+static void cleanupOldBeacons() {
+  uint32_t now = millis();
+  for (int i = 0; i < 3; i++) {
+    if (topBeacons[i].valid && (now - topBeacons[i].seenAt > BEACON_TIMEOUT_MS)) {
+      topBeacons[i].valid = false; topBeacons[i].rssi = -127;
+    }
+  }
+}
+
+static void sortTopBeacons() {
+  for (int i = 0; i < 2; i++) {
+    for (int j = i + 1; j < 3; j++) {
+      if (!topBeacons[i].valid && topBeacons[j].valid) {
+        BeaconReading tmp = topBeacons[i]; topBeacons[i] = topBeacons[j]; topBeacons[j] = tmp;
+      } else if (topBeacons[i].valid && topBeacons[j].valid && topBeacons[j].rssi > topBeacons[i].rssi) {
+        BeaconReading tmp = topBeacons[i]; topBeacons[i] = topBeacons[j]; topBeacons[j] = tmp;
+      }
+    }
+  }
+}
+
+static void updateTopBeacon(uint16_t major, uint16_t minor, int8_t rssi) {
+  uint32_t now = millis();
+  bool updated = false;
+  
+  for (int i = 0; i < 3; i++) {
+    if (topBeacons[i].valid && topBeacons[i].major == major && topBeacons[i].minor == minor) {
+      float smoothed_rssi = (topBeacons[i].rssi * 0.7) + (rssi * 0.3);
+      topBeacons[i].rssi = (int8_t)smoothed_rssi;
+      topBeacons[i].seenAt = now;
+      updated = true;
+      break;
+    }
+  }
+
+  if (!updated) {
+    for (int i = 0; i < 3; i++) {
+      if (!topBeacons[i].valid) {
+        topBeacons[i].valid = true; topBeacons[i].major = major; topBeacons[i].minor = minor;
+        topBeacons[i].rssi = rssi; topBeacons[i].seenAt = now; updated = true; break;
+      }
+    }
+  }
+
+  if (!updated) {
+    int worst = 0;
+    for (int i = 1; i < 3; i++) { if (topBeacons[i].rssi < topBeacons[worst].rssi) worst = i; }
+    if (rssi > (topBeacons[worst].rssi + 3)) {
+      topBeacons[worst].major = major; topBeacons[worst].minor = minor; topBeacons[worst].rssi = rssi;
+      topBeacons[worst].seenAt = now; topBeacons[worst].valid = true;
+    }
+  }
+
+  sortTopBeacons();
+  updateDisplayPosition();
+}
+
+static bool parseIBeacon(const ble_gap_evt_adv_report_t* report, uint16_t& major, uint16_t& minor) {
+  uint8_t buffer[31] = {0};
+  int len = Bluefruit.Scanner.parseReportByType(report, BLE_GAP_AD_TYPE_MANUFACTURER_SPECIFIC_DATA, buffer, sizeof(buffer));
+  if (len < 25 || buffer[0] != 0x4C || buffer[1] != 0x00 || buffer[2] != 0x02 || buffer[3] != 0x15) return false;
+  if (!uuidMatches(&buffer[4])) return false;
+  major = ((uint16_t)buffer[20] << 8) | buffer[21]; minor = ((uint16_t)buffer[22] << 8) | buffer[23];
+  return true;
+}
+
+/* =========================================================
+   CALLBACKS BLE 
+   ========================================================= */
+void hr_notify_cb(BLEClientCharacteristic*, uint8_t* data, uint16_t len) {
+  uint8_t bpm = parse_hr_2a37(data, len);
+  if (bpm > 0) { hrBpm = bpm; hrValid = true; updateDisplayPosition(); }
+}
+
+void bat_notify_cb(BLEClientCharacteristic*, uint8_t* data, uint16_t len) {
+  if (len >= 1) { bandBatPct = data[0]; bandBatValid = true; }
+}
+
+static bool match_band_by_mac(const char* mac) {
+  // Seguridad: si no hay MAC configurada en el generador, no se conecta a ninguna banda.
+  if (!BAND_MAC_TARGET[0] || !mac || !mac[0]) return false;
+
+  // Comparación exacta, sin distinguir mayúsculas/minúsculas.
+  // Formato esperado: AA:BB:CC:DD:EE:FF
+  return strcasecmp(BAND_MAC_TARGET, mac) == 0;
+}
+
+void connect_cb(uint16_t conn_handle) {
+  bleConnected = true;
+  requestScreenUpdate("Banda Conectada", "Sincronizando...", PERSON_NAME, CLR_LIME);
+  if (svcHR.discover(conn_handle) && chrHR.discover()) { chrHR.setNotifyCallback(hr_notify_cb); chrHR.enableNotify(); }
+  if (svcBAT.discover(conn_handle) && chrBAT.discover()) {
+    chrBAT.setNotifyCallback(bat_notify_cb); chrBAT.enableNotify();
+    uint8_t v = 0; if (chrBAT.read(&v, 1)) { bandBatPct = v; bandBatValid = true; }
+  }
+}
+
+void disconnect_cb(uint16_t, uint8_t) {
+  bleConnected = false; hrValid = false; bandBatValid = false;
+  hideHeartbeat();
+  requestScreenUpdate("Banda desconecta", "Reintentando...", PERSON_NAME, CLR_RED);
+  Bluefruit.Scanner.start(0);
+}
+
+void scan_cb(ble_gap_evt_adv_report_t* report) {
+  uint16_t major = 0, minor = 0;
+  if (parseIBeacon(report, major, minor)) updateTopBeacon(major, minor, report->rssi);
+
+  char macbuf[18] = {0};
+  uint8_t const* a = report->peer_addr.addr;
+  snprintf(macbuf, sizeof(macbuf), "%02X:%02X:%02X:%02X:%02X:%02X", a[5], a[4], a[3], a[2], a[1], a[0]);
+
+  // Conexión exclusiva por MAC asignada en el generador.
+  // No se acepta prefijo/nombre para evitar conectarse a otra banda cercana.
+  if (!bleConnected && match_band_by_mac(macbuf)) {
+    Bluefruit.Central.connect(report);
+    return;
+  }
+
+  Bluefruit.Scanner.resume();
+}
+
+/* =========================================================
+   PAYLOAD EXTENDIDO LORAWAN (36 BYTES)
+   Beacons: Major(nivel), Minor(PK), RSSI
+   ========================================================= */
+static void build_extended_payload(uint8_t* out, uint8_t& sz, bool panic) {
+  Bluefruit.Scanner.stop();
+  cleanupOldBeacons(); sortTopBeacons();
+
+  memcpy(snapshotB, topBeacons, sizeof(topBeacons));
+
+  uint8_t flags = 0;
+  if (panic) flags |= 0x01;
+  if (hrValid) flags |= 0x02;
+  if (bandBatValid) flags |= 0x04;
+  if (bleConnected) flags |= 0x08; 
+
+  uint16_t nodeId = {NODE_ID};
+  out[0] = flags; out[1] = hrValid ? hrBpm : 0; out[2] = bandBatValid ? bandBatPct : 0;
+  out[3] = (uint8_t)(nodeId & 0xFF); out[4] = (uint8_t)((nodeId >> 8) & 0xFF); out[5] = bleConnected ? 1 : 0;
+
+  for (int i = 0; i < 3; i++) {
+    int base = 6 + (i * 5);
+    if (snapshotA[i].valid) {
+      // Orden de bytes por beacon: Major(nivel), Minor(PK), RSSI codificado.
+      out[base+0] = (uint8_t)((snapshotA[i].major >> 8) & 0xFF); out[base+1] = (uint8_t)(snapshotA[i].major & 0xFF);
+      out[base+2] = (uint8_t)((snapshotA[i].minor >> 8) & 0xFF); out[base+3] = (uint8_t)(snapshotA[i].minor & 0xFF);
+      out[base+4] = encodeRSSI(snapshotA[i].rssi);
+    } else { memset(&out[base], 0, 5); }
+  }
+
+  for (int i = 0; i < 3; i++) {
+    int base = 21 + (i * 5);
+    if (snapshotB[i].valid) {
+      // Orden de bytes por beacon: Major(nivel), Minor(PK), RSSI codificado.
+      out[base+0] = (uint8_t)((snapshotB[i].major >> 8) & 0xFF); out[base+1] = (uint8_t)(snapshotB[i].major & 0xFF);
+      out[base+2] = (uint8_t)((snapshotB[i].minor >> 8) & 0xFF); out[base+3] = (uint8_t)(snapshotB[i].minor & 0xFF);
+      out[base+4] = encodeRSSI(snapshotB[i].rssi);
+    } else { memset(&out[base], 0, 5); }
+  }
+
+  sz = 36;
+  lastPeriodicSend = millis(); 
+  snapshotATaken = false; 
+
+  Bluefruit.Scanner.start(0);
+}
+
+static void prepareTxFrame(uint8_t port) {
+  (void)port; uint8_t sz = 0;
+  build_extended_payload(appData, sz, panicActive); appDataSize = sz;
+}
+
+void downLinkAckHandle(int16_t rssi, int8_t snr) { }
+void downLinkDataHandle(McpsIndication_t *mcpsIndication) { }
+void otaaJoindHandle(bool joined) { }
+
+/* =========================================================
+   PANICO Y BOTON (NUEVA LOGICA DE RESPUESTA INSTANTANEA)
+   ========================================================= */
+static void handlePanicButton() {
+  bool reading = (digitalRead(BUTTON_PIN) == LOW);
+  uint32_t now = millis();
+
+  if (reading != isPressingButton) {
+    isPressingButton = reading;
+    screenNeedsUpdate = true; // Pide refrescar la pantalla de inmediato
+  }
+
+  if (reading) {
+    if (!buttonPrev) {
+      buttonPressStart = now;
+      buttonHeld = false;
+    }
+    // Si cumple los 1.5s
+    if (!buttonHeld && (now - buttonPressStart) >= HOLD_TIME_MS) {
+      buttonHeld = true;
+      if (!panicActive) {
+        panicActive = true; 
+        panicEndMs = now + PANIC_DURATION_MS;
+        
+        isTxConfirmed = true; 
+        confirmedNbTrials = 2;
+        requestImmediateTx = true; 
+        screenNeedsUpdate = true; 
+      }
+    }
+  }
+
+  buttonPrev = reading;
+  
+  if (panicActive && ((int32_t)(now - panicEndMs) >= 0)) {
+    panicActive = false; 
+    isTxConfirmed = false;
+    requestImmediateTx = true; 
+    screenNeedsUpdate = true;
+  }
+}
+
+void buttonWakeUpISR() { }
+
+/* =========================================================
+   SETUP
+   ========================================================= */
+void setup() {
+  boardInit(LORA_DEBUG_ENABLE, LORA_DEBUG_SERIAL_NUM, 115200);
+  displayInit();
+  // Al salir de la pantalla inicial, hacemos un barrido completo antes
+  // de que la UI principal empiece a dibujar por zonas.
+  displayHardClear();
+
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(BUTTON_PIN), buttonWakeUpISR, CHANGE);
+
+  Bluefruit.begin(0, 1);
+  Bluefruit.setName(NODE_LABEL);
+
+  svcHR.begin(); chrHR.begin();
+  svcBAT.begin(); chrBAT.begin();
+
+  Bluefruit.Central.setConnectCallback(connect_cb);
+  Bluefruit.Central.setDisconnectCallback(disconnect_cb);
+  Bluefruit.Scanner.setRxCallback(scan_cb);
+  Bluefruit.Scanner.filterRssi(-95);
+  Bluefruit.Scanner.setInterval(160, 160); 
+  
+  Bluefruit.Scanner.useActiveScan(false);
+  Bluefruit.Scanner.start(0);
+
+  
+  deviceState = DEVICE_STATE_INIT;
+}
+
+/* =========================================================
+   LOOP PRINCIPAL
+   ========================================================= */
+void loop() {
+  uint32_t now = millis();
+
+  if (now - lastScanKick > 1500) {
+    lastScanKick = now;
+    if (!Bluefruit.Scanner.isRunning()) Bluefruit.Scanner.start(0);
+  }
+
+  // 1. Revisa el botón de pánico
+  handlePanicButton();
+
+  // 2. Redibuja texto si hubo cambio de estado.
+  //    displayMainScreen() no reinicia el latido ni borra el rectangulo del corazon.
+  if (screenNeedsUpdate) {
+    screen_text(scrLine1, scrLine2, scrLine3, scrColor);
+    screenNeedsUpdate = false;
+  }
+
+  // 3. Animacion del corazon estilo codigo original:
+  //    se ejecuta desde loop(), sin SoftwareTimer externo, para no competir
+  //    con BLE/LoRa ni tocar SPI desde otro contexto.
+  static uint32_t lastHeartUiTick = 0;
+  static bool heartWasVisible = false;
+  if (bleConnected && hrValid && !panicActive) {
+    if ((uint32_t)(now - lastHeartUiTick) >= 25) {
+      lastHeartUiTick = now;
+      tickHeartbeat(hrBpm);
+      heartWasVisible = true;
+    }
+  } else if (heartWasVisible) {
+    hideHeartbeat();
+    heartWasVisible = false;
+    lastHeartUiTick = now;
+  }
+
+  // 4. Gestiona tiempos de Beacons y envíos
+  uint32_t tiempoTrascurrido = now - lastPeriodicSend;
+
+  if (tiempoTrascurrido >= 15000 && !snapshotATaken) {
+    cleanupOldBeacons();
+    sortTopBeacons();
+    memcpy(snapshotA, topBeacons, sizeof(topBeacons));
+    snapshotATaken = true;
+  }
+
+  if (tiempoTrascurrido >= TX_INTERVAL_MS) {
+    isTxConfirmed = false;
+    requestImmediateTx = true;
+  }
+
+  // 5. Dispara LoRa si corresponde
+  if (requestImmediateTx && deviceState != DEVICE_STATE_JOIN) {
+    requestImmediateTx = false;
+    deviceState = DEVICE_STATE_SEND;
+  }
+
+  switch (deviceState) {
+    case DEVICE_STATE_INIT:
+      LoRaWAN.init(loraWanClass, loraWanRegion);
+      LoRaWAN.setDefaultDR(3);
+      deviceState = DEVICE_STATE_JOIN;
+      break;
+
+    case DEVICE_STATE_JOIN:
+      LoRaWAN.join();
+      break;
+      
+    case DEVICE_STATE_SEND:
+      prepareTxFrame(appPort);
+      LoRaWAN.send();
+
+      // Después del envío se pide refresco de pantalla. El payload no se modifica:
+      // prepareTxFrame() ya cargó appData/appDataSize antes de LoRaWAN.send().
+      screenNeedsUpdate = true;
+
+      deviceState = DEVICE_STATE_CYCLE;
+      break;
+      
+    case DEVICE_STATE_CYCLE:
+      txDutyCycleTime = 100;
+      LoRaWAN.cycle(txDutyCycleTime);
+      deviceState = DEVICE_STATE_SLEEP;
+      break;
+      
+    case DEVICE_STATE_SLEEP:
+      LoRaWAN.sleep(loraWanClass);
+      // Al volver desde LoRaWAN.sleep(), el loop retoma la pantalla y el corazon.
+      if (deviceState == DEVICE_STATE_SEND) {
+        if (!requestImmediateTx && (millis() - lastPeriodicSend) < TX_INTERVAL_MS) {
+          deviceState = DEVICE_STATE_CYCLE;
+        }
+      }
+      break;
+
+    default:
+      deviceState = DEVICE_STATE_INIT;
+      break;
+  }
+}
+'''
+
+
+# =======================================================================
+# ARCHIVOS AUXILIARES DISPLAY DE HELTEC
+# Esta plantilla base usa display.cpp/display.h con animacion de corazon y el objeto tft vive SOLO en display.cpp.
+# =======================================================================
+DISPLAY_CPP_TEMPLATE = r'''
+/* MinerGuard - Display Implementation
+ * Pantalla ST7789 240x135  (rotación 3 → ancho=240, alto=135)
+ *
+ * Esta versión extrae el comportamiento que funcionaba en Placaheltec.ino:
+ *   - BPM grande en la zona superior izquierda.
+ *   - Corazon animado en la zona superior derecha.
+ *   - Beacons/estado bajo la linea separadora Y=65.
+ *
+ * Diferencia importante:
+ *   displayMainScreen() NO limpia el rectangulo del corazon.
+ *   tickHeartbeat() solo limpia/dibuja su propio rectangulo privado.
+ *   Asi se evita que media pantalla quede congelada o que el corazon se pegue.
+ *
+ * Correccion adicional:
+ *   Al entrar por primera vez a la pantalla principal, se hace un borrado duro
+ *   de TODA la pantalla para eliminar restos graficos de MINERGUARD/JOINING/JOINED.
+ */
+
+#include <Arduino.h>
+#include "display.h"
+#include "heltec_nrf_lorawan.h"
+
+Adafruit_ST7789 tft = Adafruit_ST7789(&SPI1, PIN_TFT_CS, PIN_TFT_DC, PIN_TFT_RST);
+
+static uint8_t isDisplayOn = 0;
+extern DeviceClass_t loraWanClass;
+
+// Prototipo interno necesario porque displayHardClear() está definido antes
+// de displayStart(). Sin esto, C++ no conoce displayStart() en ese punto.
+static void displayStart();
+
+// ── Layout principal tipo Placaheltec ────────────────────────────────────────
+#define TOP_LEFT_X        0
+#define TOP_LEFT_Y        0
+#define TOP_LEFT_W      155
+#define TOP_LEFT_H       65
+
+#define HEART_BOX_X     160
+#define HEART_BOX_Y      16
+#define HEART_BOX_W      80
+#define HEART_BOX_H      49
+#define HEART_CX        200
+#define HEART_CY_BIG     30
+#define HEART_CY_SMALL   33
+#define HEART_R_BIG      12
+#define HEART_R_SMALL    10
+
+#define SEP_Y            65
+#define BODY_Y           68
+#define BODY_H           67
+
+#define SCREEN_W        240
+#define SCREEN_H        135
+
+// ── Estado interno de la pantalla principal ─────────────────────────────────
+static bool     mainUiDrawn       = false;
+static bool     heartVisible      = false;
+static bool     heartIsBig        = false;
+static uint8_t  lastBpm           = 0;
+static uint8_t  lastDisplayedBpm  = 255;
+static uint32_t lastBeatTime      = 0;
+static uint32_t beatStartMs       = 0;
+static uint32_t lastHeartDrawMs   = 0;
+
+// ── Batería ──────────────────────────────────────────────────────────────────
+uint16_t batteryInMV()
+{
+  analogReadResolution(12);
+  analogReference(AR_INTERNAL_3_0);
+  float mv_per_lsb = 3000.0F / 4096.0F;
+  pinMode(PIN_BAT_ADC_CTL, OUTPUT);
+  digitalWrite(PIN_BAT_ADC_CTL, 1);
+  delay(10);
+  int adcvalue = analogRead(PIN_BAT_ADC);
+  digitalWrite(PIN_BAT_ADC_CTL, 0);
+  uint16_t v = (uint16_t)((float)adcvalue * mv_per_lsb * 4.9f);
+  debug_printf("battery volt : %d\r\n", v);
+  return v;
+}
+
+// ── Utilidades internas ──────────────────────────────────────────────────────
+static uint8_t normalizeBpm(uint8_t bpm)
+{
+  if (bpm == 0) return 60;
+  if (bpm < 35) return 35;
+  if (bpm > 220) return 220;
+  return bpm;
+}
+
+static uint8_t extractBpmFromLine(const char* text)
+{
+  if (!text) return 0;
+
+  uint16_t value = 0;
+  bool found = false;
+
+  for (const char* p = text; *p; ++p) {
+    if (*p >= '0' && *p <= '9') {
+      found = true;
+      value = (uint16_t)(value * 10 + (*p - '0'));
+      if (value > 255) return 255;
+    } else if (found) {
+      break;
+    }
+  }
+
+  return found ? (uint8_t)value : 0;
+}
+
+static void resetMainUiState(bool eraseHeartArea)
+{
+  if (eraseHeartArea && heartVisible) {
+    tft.fillRect(HEART_BOX_X, HEART_BOX_Y, HEART_BOX_W, HEART_BOX_H, CLR_BG);
+  }
+
+  mainUiDrawn      = false;
+  heartVisible     = false;
+  heartIsBig       = false;
+  lastBpm          = 0;
+  lastDisplayedBpm = 255;
+  lastBeatTime     = 0;
+  beatStartMs      = 0;
+  lastHeartDrawMs  = 0;
+}
+
+// Borrado duro para transición desde pantallas temporales hacia la pantalla principal.
+// La versión anterior limpiaba por zonas; eso dejaba pequeños espacios sin refrescar
+// arriba del corazón y entre el panel BPM/corazón. Esta función barre toda la ST7789.
+static void hardClearForMainScreen()
+{
+  tft.setTextWrap(false);
+  tft.fillScreen(CLR_BG);
+
+  // Segunda pasada por bandas. Es intencionalmente redundante: en la ST7789 ayuda
+  // cuando viene de pantallas temporales con textos grandes o cambios rápidos.
+  for (int16_t y = 0; y < SCREEN_H; y += 12) {
+    tft.fillRect(0, y, SCREEN_W, 12, CLR_BG);
+  }
+
+  resetMainUiState(false);
+}
+
+void displayHardClear()
+{
+  displayStart();
+  hardClearForMainScreen();
+}
+
+// Misma primitiva que el codigo Placaheltec.ino: dos circulos + triangulo.
+static void drawHeart(int16_t x, int16_t y, int16_t r, uint16_t color)
+{
+  tft.fillCircle(x - r, y, r, color);
+  tft.fillCircle(x + r, y, r, color);
+  tft.fillTriangle(
+    x - r * 2, y + r / 2,
+    x + r * 2, y + r / 2,
+    x,         y + (r * 5) / 2,
+    color
+  );
+}
+
+static void eraseHeart()
+{
+  tft.fillRect(HEART_BOX_X, HEART_BOX_Y, HEART_BOX_W, HEART_BOX_H, CLR_BG);
+}
+
+static void drawHeartFrame(bool big)
+{
+  eraseHeart();
+  if (big) {
+    drawHeart(HEART_CX, HEART_CY_BIG, HEART_R_BIG, CLR_RED);
+  } else {
+    drawHeart(HEART_CX, HEART_CY_SMALL, HEART_R_SMALL, CLR_RED_DIM);
+  }
+
+  heartVisible    = true;
+  heartIsBig      = big;
+  lastHeartDrawMs = millis();
+}
+
+static void drawHeartRestIfNeeded()
+{
+  if (!heartVisible) drawHeartFrame(false);
+}
+
+static void drawSeparator()
+{
+  tft.drawFastHLine(0, SEP_Y, 240, CLR_BLUE);
+}
+
+static void drawBpmNumber(uint8_t bpm)
+{
+  bpm = normalizeBpm(bpm);
+
+  if (mainUiDrawn && lastDisplayedBpm == bpm) {
+    drawSeparator();
+    return;
+  }
+
+  // Solo borra el panel izquierdo. No toca el rectangulo del corazon.
+  tft.fillRect(TOP_LEFT_X, TOP_LEFT_Y, TOP_LEFT_W, TOP_LEFT_H, CLR_BG);
+
+  tft.setTextSize(6);
+  tft.setTextColor(CLR_WHITE, CLR_BG);
+  tft.setCursor(15, 15);
+
+  // Mantiene estable la posicion cuando hay 2 digitos, igual que Placaheltec.ino.
+  if (bpm < 100) tft.print(" ");
+  tft.print(bpm);
+
+  lastDisplayedBpm = bpm;
+  drawSeparator();
+}
+
+static void drawTopStatus(const char* line, uint16_t color)
+{
+  tft.fillRect(TOP_LEFT_X, TOP_LEFT_Y, TOP_LEFT_W, TOP_LEFT_H, CLR_BG);
+  tft.setTextSize(2);
+  tft.setTextColor(color, CLR_BG);
+  tft.setCursor(10, 25);
+  tft.print(line && line[0] ? line : "Minerguard");
+
+  lastDisplayedBpm = 0;
+  drawSeparator();
+}
+
+static void drawBodyLines(const char* l2, const char* l3, uint16_t color)
+{
+  // Zona inferior completa. El corazon ya no vive aqui, por eso se puede limpiar.
+  tft.fillRect(0, BODY_Y, 240, BODY_H, CLR_BG);
+
+  tft.setTextWrap(false);
+  tft.setTextSize(2);
+  tft.setTextColor(color, CLR_BG);
+  tft.setCursor(10, 75);
+  tft.print(l2 && l2[0] ? l2 : "Escaneando...");
+
+  tft.setTextSize(1);
+  tft.setTextColor(CLR_YELLOW, CLR_BG);
+  tft.setCursor(10, 118);
+  tft.print(l3 && l3[0] ? l3 : "MINERGUARD");
+}
+
+// ── Encendido / apagado ──────────────────────────────────────────────────────
+static void displayStart()
+{
+  if (isDisplayOn == 0) {
+    isDisplayOn = 1;
+    pinMode(PIN_TFT_VDD_CTL,  OUTPUT);
+    pinMode(PIN_TFT_LEDA_CTL, OUTPUT);
+    digitalWrite(PIN_TFT_VDD_CTL,  TFT_VDD_ENABLE);
+    digitalWrite(PIN_TFT_LEDA_CTL, TFT_LEDA_ENABLE);
+    tft.init(135, 240);
+    tft.setRotation(3);
+    tft.setSPISpeed(40000000);
+    tft.fillScreen(CLR_BG);
+    resetMainUiState(false);
+  }
+}
+
+void displayEnd()
+{
+  if (isDisplayOn) {
+    resetMainUiState(false);
+    isDisplayOn = 0;
+    SPI1.end();
+    digitalWrite(PIN_TFT_CS,  0);
+    digitalWrite(PIN_TFT_DC,  0);
+    digitalWrite(PIN_TFT_RST, 0);
+    digitalWrite(PIN_TFT_VDD_CTL,  !TFT_VDD_ENABLE);
+    digitalWrite(PIN_TFT_LEDA_CTL, !TFT_LEDA_ENABLE);
+  }
+}
+
+// ── tickHeartbeat: logica simple y robusta extraida del codigo que funcionaba ─
+void tickHeartbeat(uint8_t bpm)
+{
+  if (!isDisplayOn) return;
+
+  bpm = normalizeBpm(bpm);
+  uint32_t now = millis();
+
+  // Evita saturar SPI si por alguna razon llegan ticks demasiado seguidos.
+  if (lastHeartDrawMs != 0 && (now - lastHeartDrawMs) < 18) return;
+
+  uint32_t beatInterval = 60000UL / (uint32_t)bpm;
+
+  // Si cambia el BPM, actualiza numero y reinicia un latido visible.
+  if (!heartVisible || bpm != lastBpm || lastBeatTime == 0) {
+    lastBpm      = bpm;
+    lastBeatTime = now;
+    beatStartMs  = now;
+    drawBpmNumber(bpm);
+    drawHeartFrame(true);
+    return;
+  }
+
+  if ((now - lastBeatTime) >= beatInterval) {
+    // Si el loop se demoro por LoRa/BLE, no queda pegado: salta al ciclo actual.
+    uint32_t cycles = (now - lastBeatTime) / beatInterval;
+    lastBeatTime += cycles * beatInterval;
+    beatStartMs = now;
+    drawHeartFrame(true);
+    return;
+  }
+
+  // Igual que Placaheltec: contraccion breve y reposo rojo oscuro.
+  if (heartIsBig && (now - beatStartMs >= 100)) {
+    drawHeartFrame(false);
+  }
+}
+
+void hideHeartbeat()
+{
+  if (heartVisible) eraseHeart();
+  heartVisible    = false;
+  heartIsBig      = false;
+  lastBpm         = 0;
+  lastBeatTime    = 0;
+  beatStartMs     = 0;
+  lastHeartDrawMs = 0;
+}
+
+// ── Pantalla principal ───────────────────────────────────────────────────────
+void displayMainScreen(const char* l1, const char* l2, const char* l3,
+                       uint16_t color, bool showHeart)
+{
+  displayStart();
+  tft.setTextWrap(false);
+
+  // Primera entrada a la pantalla principal después de MINERGUARD/JOINING/JOINED:
+  // limpiar TODO antes de dibujar por zonas. Esto elimina la parte congelada
+  // que podía quedar de la animación inicial.
+  if (!mainUiDrawn) {
+    hardClearForMainScreen();
+  }
+
+  if (showHeart) {
+    uint8_t bpm = extractBpmFromLine(l1);
+    if (bpm == 0) bpm = lastBpm ? lastBpm : 60;
+    drawBpmNumber(bpm);
+    drawHeartRestIfNeeded();
+  } else {
+    hideHeartbeat();
+    drawTopStatus(l1, color);
+  }
+
+  drawBodyLines(l2, l3, color);
+  mainUiDrawn = true;
+}
+
+// ── Pantallas de estado LoRaWAN ──────────────────────────────────────────────
+void displayInit()
+{
+  displayStart();
+  tft.setTextWrap(false);
+  tft.fillScreen(CLR_BG);
+  resetMainUiState(false);
+
+  tft.setTextColor(CLR_CYAN);
+  tft.setTextSize(2);
+  String tmp = "MINERGUARD";
+  tft.setCursor(tft.width() / 2 - (int16_t)(tmp.length()) * 6, tft.height() / 2 - 16);
+  tft.println(tmp);
+
+  tft.setTextColor(CLR_WHITE);
+  tft.setTextSize(1);
+  tmp = "Iniciando LoRaWAN...";
+  tft.setCursor(tft.width() / 2 - (int16_t)(tmp.length()) * 3, tft.height() / 2 + 4);
+  tft.println(tmp);
+  delay(2000);
+}
+
+void displayJoining()
+{
+  displayStart();
+  tft.setTextWrap(false);
+  tft.fillScreen(CLR_BG);
+  resetMainUiState(false);
+
+  tft.setTextColor(CLR_YELLOW);
+  tft.setTextSize(2);
+  String tmp = "OTAA JOINING";
+  tft.setCursor(tft.width() / 2 - (int16_t)(tmp.length()) * 6, tft.height() / 2 - 8);
+  tft.println(tmp);
+  delay(1000);
+}
+
+void displayJoined()
+{
+  displayStart();
+  tft.setTextWrap(false);
+  tft.fillScreen(CLR_BG);
+  resetMainUiState(false);
+
+  tft.setTextColor(CLR_LIME);
+  tft.setTextSize(2);
+  String tmp = "OTAA JOINED";
+  tft.setCursor(tft.width() / 2 - (int16_t)(tmp.length()) * 6, tft.height() / 2 - 8);
+  tft.println(tmp);
+  delay(1000);
+}
+
+void displayJoinFailed()
+{
+  displayStart();
+  tft.setTextWrap(false);
+  tft.fillScreen(CLR_BG);
+  resetMainUiState(false);
+
+  tft.setTextColor(CLR_RED);
+  tft.setTextSize(2);
+  String tmp = "JOIN FAILED";
+  tft.setCursor(tft.width() / 2 - (int16_t)(tmp.length()) * 6, tft.height() / 2 - 24);
+  tft.println(tmp);
+
+  tft.setTextColor(CLR_YELLOW);
+  tft.setTextSize(1);
+  tmp = "Reintentando en 30s";
+  tft.setCursor(tft.width() / 2 - (int16_t)(tmp.length()) * 3, tft.height() / 2 + 4);
+  tft.println(tmp);
+  delay(2000);
+}
+
+void displaySending()
+{
+  // No se limpia toda la pantalla durante TX. La libreria LoRa puede llamar esta
+  // funcion en momentos sensibles; por estabilidad solo marcamos un indicador pequeño.
+  displayStart();
+  tft.setTextWrap(false);
+  tft.fillRect(212, 0, 28, 10, CLR_BG);
+  tft.setTextColor(CLR_CYAN, CLR_BG);
+  tft.setTextSize(1);
+  tft.setCursor(216, 1);
+  tft.print("TX");
+}
+
+void displayAck(int16_t rssi, int8_t snr)
+{
+  // Igual que displaySending(): evitar fillScreen/delay para no congelar la UI.
+  displayStart();
+  tft.setTextWrap(false);
+  tft.fillRect(202, 0, 38, 10, CLR_BG);
+  tft.setTextColor(CLR_LIME, CLR_BG);
+  tft.setTextSize(1);
+  tft.setCursor(204, 1);
+  tft.print("ACK");
+  (void)rssi;
+  (void)snr;
+}
+'''
+
+DISPLAY_H_TEMPLATE = r'''
+/* MinerGuard - Display Header
+ * Pantalla ST7789 240x135 con panel superior tipo Placaheltec:
+ *   - BPM grande a la izquierda
+ *   - Corazon animado arriba a la derecha
+ *   - Beacons/estado en zona inferior
+ *   - Animacion ejecutada desde loop(), sin SoftwareTimer externo
+ */
+
+#pragma once
+
+#include <Adafruit_GFX.h>
+#include <Adafruit_ST7789.h>
+#include <SPI.h>
+
+// ── Colores (alto contraste sobre negro) ─────────────────────────────────────
+#define CLR_WHITE       0xFFFF   // Texto principal
+#define CLR_CYAN        0x07FF   // Info / conectado
+#define CLR_LIME        0x87E0   // HR normal / OK
+#define CLR_YELLOW      0xFFE0   // Beacons / nombre
+#define CLR_RED         0xF800   // Error / pánico / corazón latiendo
+#define CLR_RED_DIM     0x5000   // Corazón en reposo (rojo oscuro)
+#define CLR_ORANGE      0xFD20   // Botón presionado
+#define CLR_BLUE        0x001F   // Separador
+#define CLR_LIGHTGREY   0xC618   // Texto secundario
+#define CLR_BG          0x0000   // Fondo negro
+
+// ── API pública ──────────────────────────────────────────────────────────────
+void displayInit();
+void displayJoining();
+void displayJoined();
+void displaySending();
+void displayAck(int16_t rssi, int8_t snr);
+void displayJoinFailed();
+void displayEnd();
+
+/**
+ * Barrido completo de la pantalla y reinicio del estado grafico principal.
+ * Se usa para eliminar restos visuales al salir de pantallas temporales.
+ */
+void displayHardClear();
+
+/**
+ * Pantalla principal.
+ * Si showHeart=true, extrae el BPM desde l1, por ejemplo "HR: 78 bpm",
+ * lo dibuja grande arriba a la izquierda y deja el corazon arriba a la derecha.
+ * La zona inferior queda para PK/beacons/estado.
+ */
+void displayMainScreen(const char* l1, const char* l2, const char* l3,
+                       uint16_t color, bool showHeart);
+
+/**
+ * Avanza un frame del corazon. Debe llamarse desde loop().
+ * No usa SoftwareTimer externo para evitar competencia con BLE/LoRa.
+ */
+void tickHeartbeat(uint8_t bpm);
+
+/**
+ * Borra el corazon y resetea la animacion.
+ */
+void hideHeartbeat();
+'''
+
+def sanitize_hex(value: str) -> str:
+    return re.sub(r"[^0-9A-Fa-f]", "", value).upper()
+
+def validate_hex(value: str, bytes_len: int, field_name: str) -> str:
+    cleaned = sanitize_hex(value)
+    if len(cleaned) != bytes_len * 2:
+        raise ValueError(f"{field_name} debe tener {bytes_len * 2} caracteres hex.")
+    if not HEX_RE.fullmatch(cleaned):
+        raise ValueError(f"{field_name} contiene caracteres no válidos.")
+    return cleaned
+
+def hex_to_c_array(value: str) -> str:
+    return ", ".join(f"0x{value[i:i+2]}" for i in range(0, len(value), 2))
+
+def random_hex(bytes_len: int) -> str:
+    return secrets.token_hex(bytes_len).upper()
+
+def random_unique_hex(bytes_len: int, existing_values: set[str]) -> str:
+    """Genera un hexadecimal aleatorio que no exista en existing_values."""
+    existing_clean = {sanitize_hex(v) for v in existing_values if v}
+    for _ in range(10000):
+        value = random_hex(bytes_len)
+        if value not in existing_clean:
+            return value
+    raise RuntimeError("No se pudo generar una credencial única.")
+
+class MinerguardApp:
+    def __init__(self, root: tk.Tk):
+        self.root = root
+        self.root.title("Minerguard Generator - FinalPrueba animacion fluida")
+        self.root.geometry("860x720")
+        self.root.minsize(760, 650)
+
+        self.output_dir = tk.StringVar(value=str(Path.cwd()))
+        self.output_filename = tk.StringVar(value="")
+        self.final_output_path = tk.StringVar(value="")
+
+        self.node_id = tk.StringVar(value="252")
+        self.person_name = tk.StringVar(value="Rodrigo Zuñiga")
+        self.ble_self_name = tk.StringVar(value="T114-Central")
+        self.band_prefix = tk.StringVar(value="H1_")
+        self.band_name = tk.StringVar(value="")
+        self.band_mac = tk.StringVar(value="")
+        self.period_ms = tk.StringVar(value="15000")
+
+        # Datos para CSV de importacion masiva UG65 Milesight
+        # Deben coincidir exactamente con los nombres configurados en el UG65.
+        self.ug65_application = tk.StringVar(value="Sense_T1000")
+        self.ug65_deviceprofile = tk.StringVar(value="ClassA-OTAA")
+        self.ug65_fport = tk.StringVar(value="1")
+        self.ug65_timeout = tk.StringVar(value="1440")
+
+        self.dev_eui = tk.StringVar(value=random_hex(8))
+        self.app_eui = tk.StringVar(value="0000000000000000")
+        self.app_key = tk.StringVar(value=random_hex(16))
+        
+        # Por defecto se trabaja en OTAA automático y credenciales únicas.
+        self.auto_otaa = tk.BooleanVar(value=True)
+        self.force_unique_otaa = tk.BooleanVar(value=True)
+        self.ble_scan_enabled = tk.BooleanVar(value=True)
+
+        self._build_ui()
+        self.node_id.trace_add("write", lambda *_: self.update_output_preview())
+        self.output_dir.trace_add("write", lambda *_: self.update_output_preview())
+        self.output_filename.trace_add("write", lambda *_: self.update_output_preview())
+        self.update_output_preview()
+
+    def _build_ui(self):
+        # Contenedor principal con scroll vertical.
+        # Permite ver todos los campos usando la barra lateral o la rueda del mouse.
+        outer = ttk.Frame(self.root)
+        outer.pack(fill="both", expand=True)
+
+        self.scroll_canvas = tk.Canvas(outer, borderwidth=0, highlightthickness=0)
+        self.scrollbar_y = ttk.Scrollbar(outer, orient="vertical", command=self.scroll_canvas.yview)
+        self.scroll_canvas.configure(yscrollcommand=self.scrollbar_y.set)
+
+        self.scrollbar_y.pack(side="right", fill="y")
+        self.scroll_canvas.pack(side="left", fill="both", expand=True)
+
+        frm = ttk.Frame(self.scroll_canvas, padding=12)
+        self.scroll_window = self.scroll_canvas.create_window((0, 0), window=frm, anchor="nw")
+
+        def _update_scrollregion(_event=None):
+            self.scroll_canvas.configure(scrollregion=self.scroll_canvas.bbox("all"))
+
+        def _resize_inner_frame(event):
+            self.scroll_canvas.itemconfigure(self.scroll_window, width=event.width)
+
+        frm.bind("<Configure>", _update_scrollregion)
+        self.scroll_canvas.bind("<Configure>", _resize_inner_frame)
+
+        def _on_mousewheel(event):
+            if hasattr(event, "delta") and event.delta:
+                self.scroll_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            return "break"
+
+        def _on_mousewheel_up(_event):
+            self.scroll_canvas.yview_scroll(-1, "units")
+            return "break"
+
+        def _on_mousewheel_down(_event):
+            self.scroll_canvas.yview_scroll(1, "units")
+            return "break"
+
+        self.root.bind_all("<MouseWheel>", _on_mousewheel)
+        self.root.bind_all("<Button-4>", _on_mousewheel_up)
+        self.root.bind_all("<Button-5>", _on_mousewheel_down)
+
+        title = ttk.Label(frm, text="Generador Minerguard para Heltec T114", font=("Segoe UI", 16, "bold"))
+        title.pack(anchor="w", pady=(0, 10))
+
+        box1 = ttk.LabelFrame(frm, text="Datos del nodo", padding=10)
+        box1.pack(fill="x", pady=6)
+        self._entry(box1, "Node ID", self.node_id, 0)
+        self._entry(box1, "Nombre persona", self.person_name, 1)
+        self._entry(box1, "Nombre BLE T114", self.ble_self_name, 2)
+        self._entry(box1, "Periodo envío (ms)", self.period_ms, 3)
+
+        box2 = ttk.LabelFrame(frm, text="Banda cardiaca", padding=10)
+        box2.pack(fill="x", pady=6)
+        self._entry(box2, "Prefijo banda", self.band_prefix, 0)
+        self._entry(box2, "Nombre banda", self.band_name, 1)
+        self._entry(box2, "MAC banda", self.band_mac, 2)
+
+        box3 = ttk.LabelFrame(frm, text="Credenciales LoRaWAN", padding=10)
+        box3.pack(fill="x", pady=6)
+        self._entry(box3, "DevEUI", self.dev_eui, 0, width=42)
+        self._entry(box3, "AppEUI / JoinEUI", self.app_eui, 1, width=42)
+        self._entry(box3, "AppKey", self.app_key, 2, width=42)
+
+        ttk.Checkbutton(box3, text="Generar OTAA automáticamente", variable=self.auto_otaa, command=self.toggle_otaa_mode).grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 2))
+        ttk.Checkbutton(box3, text="Forzar DevEUI y AppKey únicos al generar", variable=self.force_unique_otaa).grid(row=4, column=0, columnspan=2, sticky="w", pady=(0, 6))
+
+        btns = ttk.Frame(box3)
+        btns.grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        ttk.Button(btns, text="Generar DevEUI", command=self.regen_deveui).pack(side="left", padx=(0, 6))
+        ttk.Button(btns, text="Generar AppKey", command=self.regen_appkey).pack(side="left", padx=(0, 6))
+        ttk.Button(btns, text="AppEUI = 000...", command=lambda: self.app_eui.set("0000000000000000")).pack(side="left")
+
+        box_ug65 = ttk.LabelFrame(frm, text="CSV UG65 Milesight Bulk Import", padding=10)
+        box_ug65.pack(fill="x", pady=6)
+        self._entry(box_ug65, "Application UG65", self.ug65_application, 0, width=34)
+        self._entry(box_ug65, "Device Profile UG65", self.ug65_deviceprofile, 1, width=34)
+        self._entry(box_ug65, "FPort", self.ug65_fport, 2, width=12)
+        self._entry(box_ug65, "Timeout", self.ug65_timeout, 3, width=12)
+
+        scan_box = ttk.LabelFrame(frm, text="Escaneo BLE de banda", padding=10)
+        scan_box.pack(fill="x", pady=6)
+        ttk.Checkbutton(scan_box, text="Habilitar búsqueda de banda por Bluetooth", variable=self.ble_scan_enabled).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 6))
+        ttk.Button(scan_box, text="Buscar bandas BLE", command=self.scan_ble_devices, width=22).grid(row=1, column=0, sticky="w")
+        ttk.Label(scan_box, text="Requiere Bluetooth en el PC. La Heltec conectará solo por MAC asignada.").grid(row=1, column=1, sticky="w", padx=8)
+
+        box4 = ttk.LabelFrame(frm, text="Salida", padding=10)
+        box4.pack(fill="x", pady=6)
+        self._entry(box4, "Carpeta base", self.output_dir, 0, width=60)
+        ttk.Button(box4, text="Elegir carpeta", command=self.choose_folder).grid(row=0, column=2, padx=6, pady=4, sticky="w")
+        self._entry(box4, "Archivo .ino", self.output_filename, 1, width=40)
+        ttk.Button(box4, text="Guardar como...", command=self.choose_save_as).grid(row=1, column=2, padx=6, pady=4, sticky="w")
+        ttk.Label(box4, text="Ruta final").grid(row=2, column=0, sticky="nw", padx=(0, 8), pady=4)
+        ttk.Label(box4, textvariable=self.final_output_path, wraplength=560).grid(row=2, column=1, columnspan=2, sticky="w", pady=4)
+
+        actions = ttk.Frame(frm)
+        actions.pack(fill="x", pady=(10, 6))
+        ttk.Button(actions, text="Generar sketch", command=self.generate, width=22).pack(side="left")
+        ttk.Button(actions, text="Abrir carpeta salida", command=self.open_output, width=22).pack(side="left", padx=8)
+        ttk.Button(actions, text="Copiar resumen", command=self.copy_summary, width=22).pack(side="left")
+        ttk.Button(actions, text="Salir", command=self.root.destroy, width=15).pack(side="right")
+
+        log_box = ttk.LabelFrame(frm, text="Resumen", padding=10)
+        log_box.pack(fill="both", expand=True, pady=6)
+
+        log_frame = ttk.Frame(log_box)
+        log_frame.pack(fill="both", expand=True)
+        self.text = tk.Text(log_frame, height=16, wrap="word", font=("Consolas", 10))
+        log_scroll = ttk.Scrollbar(log_frame, orient="vertical", command=self.text.yview)
+        self.text.configure(yscrollcommand=log_scroll.set)
+        log_scroll.pack(side="right", fill="y")
+        self.text.pack(side="left", fill="both", expand=True)
+
+        self.write_log("App lista. Completa los datos y pulsa 'Generar sketch'. La banda cardiaca se conectará exclusivamente por MAC. Beacons: Major=nivel, Minor=PK.")
+
+    def _entry(self, parent, label, var, row, width=34):
+        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Entry(parent, textvariable=var, width=width).grid(row=row, column=1, sticky="w", pady=4)
+
+    def write_log(self, msg: str):
+        self.text.insert("end", msg + "\n")
+        self.text.see("end")
+
+    def toggle_otaa_mode(self):
+        auto = self.auto_otaa.get()
+        state = "disabled" if auto else "normal"
+        try:
+            for var in (self.dev_eui, self.app_eui, self.app_key):
+                pass
+            parent = self.root.nametowidget(self.root.winfo_children()[0].winfo_children()[3])
+        except Exception:
+            parent = None
+        for widget in self.root.winfo_children():
+            self._set_entries_state(widget, state)
+            
+        if auto:
+            if not self.dev_eui.get().strip() or len(sanitize_hex(self.dev_eui.get())) != 16:
+                self.dev_eui.set(random_hex(8))
+            self.app_eui.set("0000000000000000")
+            if not self.app_key.get().strip() or len(sanitize_hex(self.app_key.get())) != 32:
+                self.app_key.set(random_hex(16))
+            self.write_log("Modo OTAA automático habilitado. Al generar se crearán DevEUI y AppKey únicos.")
+        else:
+            self.write_log("Modo OTAA manual habilitado.")
+
+    def _set_entries_state(self, widget, state):
+        for child in widget.winfo_children():
+            try:
+                if isinstance(child, ttk.Entry):
+                    var_name = str(child.cget("textvariable"))
+                    tracked = {str(self.dev_eui), str(self.app_eui), str(self.app_key)}
+                    if var_name in tracked:
+                        child.configure(state=state)
+            except Exception:
+                pass
+            self._set_entries_state(child, state)
+
+    def scan_ble_devices(self):
+        if not self.ble_scan_enabled.get():
+            messagebox.showinfo("BLE", "La búsqueda BLE está deshabilitada.")
+            return
+
+        try:
+            from bleak import BleakScanner
+            import asyncio
+            import threading
+        except Exception:
+            messagebox.showerror("BLE", "No se encontró 'bleak'. Instálalo con: pip install bleak")
+            self.write_log("BLE scan no disponible: falta paquete bleak.")
+            return
+
+        prefix = self.band_prefix.get().strip()
+        self.write_log("Iniciando escaneo BLE de 8 segundos en hilo separado...")
+
+        progress = tk.Toplevel(self.root)
+        progress.title("Escaneo BLE")
+        progress.geometry("360x120")
+        progress.transient(self.root)
+        progress.grab_set()
+        ttk.Label(progress, text="Buscando bandas BLE...", font=("Segoe UI", 11, "bold")).pack(pady=(16, 8))
+        status_lbl = ttk.Label(progress, text="Espera unos segundos.")
+        status_lbl.pack()
+        ttk.Progressbar(progress, mode="indeterminate", length=280).pack(pady=12)
+        pb = progress.winfo_children()[-1]
+        pb.start(10)
+
+        def worker():
+            async def do_scan():
+                found = await BleakScanner.discover(timeout=8.0)
+                items = []
+                for d in found:
+                    name = (d.name or "").strip()
+                    mac = (d.address or "").strip().upper()
+                    rssi = getattr(d, "rssi", None)
+                    if prefix:
+                        if name.startswith(prefix):
+                            items.append((name, mac, rssi))
+                    else:
+                        items.append((name, mac, rssi))
+                return items
+
+            try:
+                devices = asyncio.run(do_scan())
+                self.root.after(0, lambda: self._finish_ble_scan(progress, devices, None))
+            except Exception as e:
+                self.root.after(0, lambda: self._finish_ble_scan(progress, None, e))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_ble_scan(self, progress_window, devices, error):
+        try:
+            progress_window.grab_release()
+            progress_window.destroy()
+        except Exception:
+            pass
+
+        if error is not None:
+            messagebox.showerror("BLE", f"Falló el escaneo BLE: {error}")
+            self.write_log(f"ERROR BLE: {error}")
+            return
+
+        if not devices:
+            messagebox.showinfo("BLE", "No se encontraron bandas con ese filtro.")
+            self.write_log("No se encontraron dispositivos BLE compatibles.")
+            return
+
+        picker = tk.Toplevel(self.root)
+        picker.title("Seleccionar banda BLE")
+        picker.geometry("620x360")
+        picker.transient(self.root)
+
+        ttk.Label(picker, text="Selecciona la banda detectada:", font=("Segoe UI", 11, "bold")).pack(anchor="w", padx=10, pady=10)
+
+        columns = ("name", "mac", "rssi")
+        tree = ttk.Treeview(picker, columns=columns, show="headings", height=10)
+        tree.heading("name", text="Nombre")
+        tree.heading("mac", text="MAC")
+        tree.heading("rssi", text="RSSI")
+        tree.column("name", width=180)
+        tree.column("mac", width=220)
+        tree.column("rssi", width=80, anchor="center")
+        tree.pack(fill="both", expand=True, padx=10, pady=6)
+
+        for name, mac, rssi in devices:
+            tree.insert("", "end", values=(name or "<sin nombre>", mac, "" if rssi is None else rssi))
+
+        def use_selected():
+            sel = tree.selection()
+            if not sel:
+                return
+            vals = tree.item(sel[0], "values")
+            self.band_name.set("" if vals[0] == "<sin nombre>" else vals[0])
+            self.band_mac.set(vals[1])
+            self.write_log(f"Banda seleccionada: {self.band_name.get() or '<sin nombre>'} / {self.band_mac.get()}")
+            picker.destroy()
+
+        btn_row = ttk.Frame(picker)
+        btn_row.pack(fill="x", padx=10, pady=10)
+        ttk.Button(btn_row, text="Usar selección", command=use_selected).pack(side="left")
+        ttk.Button(btn_row, text="Cancelar", command=picker.destroy).pack(side="left", padx=8)
+
+    def update_output_preview(self):
+        node_id = self.node_id.get().strip() or "SIN_ID"
+        filename = self.output_filename.get().strip() or f"Minerguard_{node_id}.ino"
+        if not filename.lower().endswith(".ino"):
+            filename += ".ino"
+        # Arduino IDE exige que el .ino esté dentro de una carpeta con el mismo nombre.
+        # Ejemplo correcto: Minerguard_280Animacion/Minerguard_280Animacion.ino
+        sketch_folder = Path(filename).stem
+        base = Path(self.output_dir.get().strip() or Path.cwd())
+        self.final_output_path.set(str(base / sketch_folder / filename))
+
+    def choose_save_as(self):
+        node_id = self.node_id.get().strip() or "252"
+        base = Path(self.output_dir.get().strip() or Path.cwd())
+        initialfile = self.output_filename.get().strip() or f"Minerguard_{node_id}.ino"
+        path = filedialog.asksaveasfilename(
+            initialdir=str(base),
+            initialfile=initialfile,
+            defaultextension=".ino",
+            filetypes=[("Arduino sketch", "*.ino"), ("Todos los archivos", "*.*")]
+        )
+        if path:
+            p = Path(path)
+            # Si el usuario eligió una ruta que ya está dentro de una carpeta con el
+            # mismo nombre del .ino, usamos la carpeta padre como base para no anidar.
+            if p.parent.name == p.stem:
+                self.output_dir.set(str(p.parent.parent))
+            else:
+                self.output_dir.set(str(p.parent))
+            self.output_filename.set(p.name)
+            self.write_log(f"Archivo de salida seleccionado: {p}")
+            self.update_output_preview()
+
+    def get_csv_path(self) -> Path:
+        base = Path(self.output_dir.get().strip() or Path.cwd())
+        return base / "nodes.csv"
+
+    def read_existing_credentials(self, csv_path: Path) -> tuple[set[str], set[str]]:
+        """Lee nodes.csv y retorna DevEUI/AppKey ya usados para evitar duplicados."""
+        used_dev_euis: set[str] = set()
+        used_app_keys: set[str] = set()
+
+        if not csv_path.exists():
+            return used_dev_euis, used_app_keys
+
+        try:
+            with csv_path.open("r", newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    dev = sanitize_hex(row.get("devEUI", ""))
+                    key = sanitize_hex(row.get("appKey", ""))
+                    if len(dev) == 16:
+                        used_dev_euis.add(dev)
+                    if len(key) == 32:
+                        used_app_keys.add(key)
+        except Exception as e:
+            self.write_log(f"Advertencia: no se pudo leer nodes.csv para validar unicidad: {e}")
+
+        return used_dev_euis, used_app_keys
+
+    def ensure_unique_otaa_credentials(self, csv_path: Path) -> tuple[str, str]:
+        """Genera DevEUI y AppKey nuevos y únicos contra nodes.csv."""
+        used_dev_euis, used_app_keys = self.read_existing_credentials(csv_path)
+
+        dev_eui = random_unique_hex(8, used_dev_euis)
+        app_key = random_unique_hex(16, used_app_keys)
+
+        self.dev_eui.set(dev_eui)
+        self.app_key.set(app_key)
+
+        if not self.app_eui.get().strip():
+            self.app_eui.set("0000000000000000")
+
+        self.write_log(f"Credenciales únicas generadas -> DevEUI: {dev_eui} / AppKey: {app_key}")
+        return dev_eui, app_key
+
+    def regen_deveui(self):
+        used_dev_euis, _ = self.read_existing_credentials(self.get_csv_path())
+        nuevo_dev_eui = random_unique_hex(8, used_dev_euis)
+        self.dev_eui.set(nuevo_dev_eui)
+        self.write_log(f"Nuevo DevEUI único: {self.dev_eui.get()}")
+
+    def regen_appkey(self):
+        _, used_app_keys = self.read_existing_credentials(self.get_csv_path())
+        self.app_key.set(random_unique_hex(16, used_app_keys))
+        self.write_log("AppKey única regenerada.")
+
+    def choose_folder(self):
+        folder = filedialog.askdirectory(initialdir=self.output_dir.get() or str(Path.cwd()))
+        if folder:
+            self.output_dir.set(folder)
+            self.write_log(f"Carpeta seleccionada: {folder}")
+            self.update_output_preview()
+
+    def validate(self):
+        if self.auto_otaa.get():
+            if not self.dev_eui.get().strip() or len(sanitize_hex(self.dev_eui.get())) != 16:
+                self.dev_eui.set(random_hex(8))
+            if not self.app_eui.get().strip():
+                self.app_eui.set("0000000000000000")
+            if not self.app_key.get().strip() or len(sanitize_hex(self.app_key.get())) != 32:
+                self.app_key.set(random_hex(16))
+
+        node_id = self.node_id.get().strip()
+        if not node_id.isdigit():
+            raise ValueError("Node ID debe ser numérico.")
+
+        if not self.band_mac.get().strip():
+            raise ValueError("Debes asignar la MAC de la banda cardiaca. En esta versión la Heltec no conecta por nombre/prefijo.")
+
+        if not MAC_RE.fullmatch(self.band_mac.get().strip()):
+            raise ValueError("MAC banda debe tener formato AA:BB:CC:DD:EE:FF.")
+
+        period = self.period_ms.get().strip()
+        if not period.isdigit() or int(period) < 1000:
+            raise ValueError("Periodo de envío debe ser un número >= 1000 ms.")
+
+        fport = self.ug65_fport.get().strip()
+        if not fport.isdigit() or int(fport) < 1 or int(fport) > 223:
+            raise ValueError("FPort UG65 debe ser un número entre 1 y 223.")
+
+        timeout = self.ug65_timeout.get().strip()
+        if not timeout.isdigit() or int(timeout) < 1:
+            raise ValueError("Timeout UG65 debe ser un número mayor a 0.")
+
+        if not self.ug65_application.get().strip():
+            raise ValueError("Application UG65 no puede estar vacía.")
+
+        if not self.ug65_deviceprofile.get().strip():
+            raise ValueError("Device Profile UG65 no puede estar vacío.")
+
+        dev_eui = validate_hex(self.dev_eui.get(), 8, "DevEUI")
+        app_eui = validate_hex(self.app_eui.get(), 8, "AppEUI/JoinEUI")
+        app_key = validate_hex(self.app_key.get(), 16, "AppKey")
+        return node_id, dev_eui, app_eui, app_key
+
+    def build_code(self):
+        node_id, dev_eui, app_eui, app_key = self.validate()
+        data = {
+            "NODE_ID": node_id,
+            "PERSON_NAME": self.person_name.get().strip(),
+            "BAND_NAME": self.band_name.get().strip(),
+            "BAND_MAC": self.band_mac.get().strip().upper(),
+            "BAND_NAME_PREFIX": self.band_prefix.get().strip(),
+            "BLE_SELF_NAME": self.ble_self_name.get().strip(),
+            "APP_TX_MS": self.period_ms.get().strip(),
+            "DEVEUI": hex_to_c_array(dev_eui),
+            "APPEUI": hex_to_c_array(app_eui),
+            "APPKEY": hex_to_c_array(app_key),
+        }
+        
+        code = SKETCH_TEMPLATE
+        for key, value in data.items():
+            code = code.replace(f"{{{key}}}", str(value))
+            
+        return code, dev_eui, app_eui, app_key
+
+    def generate(self):
+        try:
+            base = Path(self.output_dir.get().strip() or Path.cwd())
+            csv_path = base / "nodes.csv"
+
+            # CLAVE PARA PRODUCCIÓN: cada sketch nuevo recibe DevEUI y AppKey únicos.
+            # Se valida contra nodes.csv para no repetir credenciales ya generadas.
+            if self.auto_otaa.get() and self.force_unique_otaa.get():
+                self.ensure_unique_otaa_credentials(csv_path)
+
+            code, dev_eui, app_eui, app_key = self.build_code()
+            node_id = self.node_id.get().strip()
+            
+            filename = self.output_filename.get().strip() or f"Minerguard_{node_id}.ino"
+            if not filename.lower().endswith(".ino"):
+                filename += ".ino"
+
+            # Arduino IDE exige que la carpeta del sketch tenga el mismo nombre que el .ino.
+            # Esto evita el aviso: "The file needs to be inside a sketch folder named ...".
+            outdir = base / Path(filename).stem
+            outdir.mkdir(parents=True, exist_ok=True)
+
+            ino_path = outdir / filename
+
+            # IMPORTANTE: Arduino IDE compila TODOS los .ino/.cpp/.h que existan
+            # dentro de la carpeta del sketch. Esta plantilla SÍ necesita display.cpp
+            # y display.h, por eso los sobrescribimos con la versión correcta.
+            # También evitamos dejar sketches .ino antiguos dentro de la misma carpeta,
+            # porque Arduino puede abrirlos como pestañas del mismo proyecto.
+            for old_ino in outdir.glob("*.ino"):
+                if old_ino.name != filename:
+                    try:
+                        old_ino.unlink()
+                    except Exception as e:
+                        self.write_log(f"Aviso: no se pudo eliminar {old_ino}: {e}")
+
+            ino_path.write_text(code, encoding="utf-8")
+            (outdir / "display.cpp").write_text(DISPLAY_CPP_TEMPLATE, encoding="utf-8")
+            (outdir / "display.h").write_text(DISPLAY_H_TEMPLATE, encoding="utf-8")
+
+            # CAPTURAMOS LA FECHA Y HORA ACTUAL DEL COMPUTADOR
+            timestamp_actual = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            row = {
+                "node_id": node_id,
+                "person": self.person_name.get().strip(),
+                "devEUI": dev_eui,
+                "appEUI": app_eui,
+                "appKey": app_key,
+                "band_prefix": self.band_prefix.get().strip(),
+                "band_name": self.band_name.get().strip(),
+                "band_mac": self.band_mac.get().strip().upper(),
+                "ble_self_name": self.ble_self_name.get().strip(),
+                "period_ms": self.period_ms.get().strip(),
+                "sketch_path": str(ino_path),
+                "creation_date": timestamp_actual, # SE AÑADE AL DICCIONARIO
+            }
+            self.save_csv(csv_path, row)
+
+            ug65_csv_path = base / "ug65_bulk_import_devices.csv"
+            self.save_ug65_bulk_csv(ug65_csv_path, node_id, self.person_name.get().strip(), dev_eui, app_key)
+
+            summary = (
+                f"Sketch generado correctamente el {timestamp_actual}.\n"
+                f"Carpeta: {outdir}\n"
+                f"Archivo: {ino_path.name}\n"
+                f"Auxiliares: display.cpp, display.h\n"
+                f"Banda MAC exclusiva: {self.band_mac.get().strip().upper()}\n"
+                f"Convencion beacons: Major = nivel / Minor = PK\n"
+                f"DevEUI: {dev_eui}\n"
+                f"AppEUI: {app_eui}\n"
+                f"AppKey: {app_key}\n"
+                f"CSV interno: {csv_path}\n"
+                f"CSV UG65 import: {ug65_csv_path}\n"
+            )
+            self.write_log(summary)
+            messagebox.showinfo("Listo", f"Sketch generado en:\n{ino_path}")
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+            self.write_log(f"ERROR: {e}")
+
+    def save_csv(self, csv_path: Path, row: dict):
+        file_exists = csv_path.exists()
+        with csv_path.open("a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=list(row.keys()))
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow(row)
+
+    def save_ug65_bulk_csv(self, csv_path: Path, node_id: str, person: str, dev_eui: str, app_key: str):
+        """Crea/agrega una fila al CSV de importación masiva del UG65 Milesight.
+
+        Formato basado en el CSV exportado por el UG65:
+        name,description,deveui,deviceprofile,application,payloadcodec,fport,appkey,devaddr,nwkskey,appskey,timeout
+        """
+        headers = [
+            "name",
+            "description",
+            "deveui",
+            "deviceprofile",
+            "application",
+            "payloadcodec",
+            "fport",
+            "appkey",
+            "devaddr",
+            "nwkskey",
+            "appskey",
+            "timeout",
+        ]
+
+        row = {
+            "name": str(node_id).strip(),
+            "description": person.strip(),
+            "deveui": sanitize_hex(dev_eui).lower(),
+            "deviceprofile": self.ug65_deviceprofile.get().strip(),
+            "application": self.ug65_application.get().strip(),
+            "payloadcodec": "",
+            "fport": self.ug65_fport.get().strip(),
+            "appkey": sanitize_hex(app_key).lower(),
+            "devaddr": "",
+            "nwkskey": "",
+            "appskey": "",
+            "timeout": self.ug65_timeout.get().strip(),
+        }
+
+        file_exists = csv_path.exists()
+        with csv_path.open("a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=headers)
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow(row)
+
+    def open_output(self):
+        folder = Path(self.output_dir.get().strip() or Path.cwd())
+        if not folder.exists():
+            folder.mkdir(parents=True, exist_ok=True)
+        try:
+            os.startfile(folder)  # type: ignore[attr-defined]
+        except Exception:
+            messagebox.showinfo("Carpeta", str(folder))
+
+    def copy_summary(self):
+        try:
+            text = self.text.get("1.0", "end").strip()
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+            self.write_log("Resumen copiado al portapapeles.")
+        except Exception as e:
+            self.write_log(f"No se pudo copiar el resumen: {e}")
+
+def main():
+    root = tk.Tk()
+    style = ttk.Style(root)
+    try:
+        style.theme_use("vista")
+    except Exception:
+        pass
+    app = MinerguardApp(root)
+    app.toggle_otaa_mode()
+    root.mainloop()
+
+if __name__ == "__main__":
+    main()

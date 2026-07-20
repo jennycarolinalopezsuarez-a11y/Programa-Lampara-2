@@ -61,7 +61,7 @@ Mensajes de cambio:
 ## Compilar
 
 ```powershell
-cd "C:\Users\Innovacion FMT\Documents\Tomas\pruebalilygo\PlatformIO_Minerguard_TEcho_4_GPS_AUTO_SEGUN_BEACON_V2_RSSI_FIX"
+cd "C:USERPROFILE\pruebalilygo\PlatformIO_Minerguard_TEcho_4_GPS_AUTO_SEGUN_BEACON_V2_RSSI_FIX"
 
 & "$env:USERPROFILE\.platformio\penv\Scripts\platformio.exe" run -e minerguard_techo_6_gps_hr20 -t clean
 

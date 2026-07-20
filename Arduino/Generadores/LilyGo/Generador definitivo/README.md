@@ -146,13 +146,13 @@ Ejemplo:
 
 ```text
 Carpeta base:
-C:\Users\Innovacion FMT\Documents\Tomas\pruebalilygo
+C:%USERPROFILE%\pruebalilygo
 
 Proyecto:
 PlatformIO_Minerguard_TEcho_8_GPS_AUTO_V3
 
 Ruta final:
-C:\Users\Innovacion FMT\Documents\Tomas\pruebalilygo\PlatformIO_Minerguard_TEcho_8_GPS_AUTO_V3
+C:%USERPROFILE%\pruebalilygo\PlatformIO_Minerguard_TEcho_8_GPS_AUTO_V3
 ```
 
 

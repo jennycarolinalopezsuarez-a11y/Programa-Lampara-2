@@ -53,7 +53,7 @@ especialmente porque el RESET puede producir un arranque GNSS en frío.
 ## Comandos
 
 ```powershell
-cd "C:\Users\Innovacion FMT\Documents\Tomas\pruebalilygo\PlatformIO_Minerguard_TEcho_6_GPS_AUTO_SEGUN_BEACON_V3_WAKE_RECOVERY"
+cd "C:USERPROFILE\pruebalilygo\PlatformIO_Minerguard_TEcho_6_GPS_AUTO_SEGUN_BEACON_V3_WAKE_RECOVERY"
 
 & "$env:USERPROFILE\.platformio\penv\Scripts\platformio.exe" run -e minerguard_techo_6_gps_hr20 -t clean
 

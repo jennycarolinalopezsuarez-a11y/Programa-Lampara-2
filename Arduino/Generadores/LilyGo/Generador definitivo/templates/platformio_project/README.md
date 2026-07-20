@@ -48,7 +48,7 @@ FPort 1
 ## Compilar
 
 ```powershell
-cd "C:\Users\Innovacion FMT\Documents\Tomas\pruebalilygo\PlatformIO_Minerguard_TEcho_6_LMIC_GPS_HR20"
+cd "C:USERPROFILE\pruebalilygo\PlatformIO_Minerguard_TEcho_6_LMIC_GPS_HR20"
 
 & "$env:USERPROFILE\.platformio\penv\Scripts\platformio.exe" run -e minerguard_techo_6_gps_hr20
 ```

@@ -63,7 +63,7 @@ static const uint32_t GPS_SWITCH_CONFIRM_MS = 3000;
 ## Compilar
 
 ```powershell
-cd "C:\Users\Innovacion FMT\Documents\Tomas\pruebalilygo\PlatformIO_Minerguard_TEcho_4_GPS_AUTO_SEGUN_BEACON_V1"
+cd "C:USERPROFILE\pruebalilygo\PlatformIO_Minerguard_TEcho_4_GPS_AUTO_SEGUN_BEACON_V1"
 
 & "$env:USERPROFILE\.platformio\penv\Scripts\platformio.exe" run -e minerguard_techo_6_gps_hr20 -t clean
 

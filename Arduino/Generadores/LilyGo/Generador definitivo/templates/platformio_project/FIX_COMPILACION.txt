@@ -1,0 +1,25 @@
+CORRECCIÓN DE COMPILACIÓN
+
+Error corregido:
+    'getGpsSatellitesPayload' was not declared in this scope
+
+Causa:
+    updateDisplayPosition() llama a getGpsSatellitesPayload() antes de que
+    el compilador haya visto la definición de esa función.
+
+Solución:
+    Se añadieron los prototipos de las funciones auxiliares GPS en la sección
+    PROTOTIPOS, antes de updateDisplayPosition():
+
+    uint8_t getGpsSatellitesPayload();
+    uint8_t getGpsHdopX10Payload();
+    void writeInt32BE(uint8_t *out, uint8_t offset, int32_t value);
+
+No se modificaron:
+    - NODE_ID 4
+    - DevEUI
+    - AppKey
+    - banda BLE
+    - reglas RSSI beacon/GPS
+    - payload de 46 bytes
+    - HR7, HR8 y HR20

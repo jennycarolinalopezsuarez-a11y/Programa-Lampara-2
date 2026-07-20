@@ -1,0 +1,489 @@
+[
+    {
+        "id": "6d775db641c37ecb",
+        "type": "tab",
+        "label": "MinerGuard T1000 + Heltec UG65 IOT2050",
+        "disabled": false,
+        "info": ""
+    },
+    {
+        "id": "2e8c0e41c8ca7771",
+        "type": "junction",
+        "z": "6d775db641c37ecb",
+        "x": 860,
+        "y": 740,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "4118a34da14b7951",
+        "type": "mqtt in",
+        "z": "6d775db641c37ecb",
+        "name": "UG65 uplink T1000",
+        "topic": "minerguard/t1000/uplink",
+        "qos": "0",
+        "datatype": "auto-detect",
+        "broker": "mqtt_broker_ug65_iot2050",
+        "nl": false,
+        "rap": false,
+        "inputs": 0,
+        "x": 110,
+        "y": 500,
+        "wires": [
+            [
+                "b50fe47949ecc462"
+            ]
+        ]
+    },
+    {
+        "id": "b50fe47949ecc462",
+        "type": "function",
+        "z": "6d775db641c37ecb",
+        "name": "Normalizar HELTEC UG65",
+        "func": "// --- NORMALIZAR HELTEC UG65 / CHIRPSTACK ---\n// Acepta cualquier DevEUI válido (16 hex), sin depender de uno fijo\n\nvar p = msg.payload || {};\n\n// Si payload viene como string, intentar parsearlo\nif (typeof p === \"string\") {\n    try {\n        p = JSON.parse(p);\n    } catch (e) {\n        p = {};\n    }\n}\n\n// ----------------------------------------------------\n// Función: extraer y normalizar DevEUI desde varios campos\n// ----------------------------------------------------\nfunction getNormalizedDevEUI(obj) {\n    var candidates = [\n        obj.devEUI,\n        obj.devEui,\n        obj.deviceInfo && obj.deviceInfo.devEUI,\n        obj.deviceInfo && obj.deviceInfo.devEui,\n        obj.endDeviceIds && obj.endDeviceIds.devEui,\n        obj.endDeviceIds && obj.endDeviceIds.devEUI\n    ];\n\n    for (var i = 0; i < candidates.length; i++) {\n        var v = candidates[i];\n        if (v !== undefined && v !== null && v !== \"\") {\n            var clean = String(v)\n                .replace(/[^0-9a-fA-F]/g, \"\")   // elimina :, -, espacios, etc.\n                .toUpperCase();\n\n            if (/^[0-9A-F]{16}$/.test(clean)) {\n                return clean;\n            }\n        }\n    }\n    return null;\n}\n\n// ----------------------------------------------------\n// Función: extraer nombre del dispositivo\n// ----------------------------------------------------\nfunction getDeviceName(obj) {\n    return obj.deviceName ||\n           (obj.deviceInfo && obj.deviceInfo.deviceName) ||\n           (obj.deviceInfo && obj.deviceInfo.name) ||\n           null;\n}\n\n// ----------------------------------------------------\n// Función: extraer nombre de aplicación\n// ----------------------------------------------------\nfunction getApplicationName(obj) {\n    return obj.applicationName ||\n           (obj.deviceInfo && obj.deviceInfo.applicationName) ||\n           null;\n}\n\n// ----------------------------------------------------\n// Información del gateway / radio\n// ----------------------------------------------------\nvar rx0 = {};\nif (p.rxInfo && Array.isArray(p.rxInfo) && p.rxInfo.length > 0) {\n    rx0 = p.rxInfo[0];\n}\n\nvar tx = p.txInfo || {};\nvar dr = tx.dataRate || {};\n\n// ----------------------------------------------------\n// Normalizar DevEUI\n// ----------------------------------------------------\nvar normalizedDevEUI = getNormalizedDevEUI(p);\n\n// ----------------------------------------------------\n// Crear objeto limpio de salida\n// ----------------------------------------------------\nvar out = {\n    timestamp: p.time || p.gatewayTime || new Date().toISOString(),\n    application: getApplicationName(p),\n    application_id: p.applicationID || p.applicationId || null,\n    device_name: getDeviceName(p),\n    dev_eui: normalizedDevEUI,\n    dev_eui_valid: normalizedDevEUI !== null,\n\n    fcnt: (typeof p.fCnt !== \"undefined\") ? p.fCnt :\n          (typeof p.fCntUp !== \"undefined\") ? p.fCntUp : null,\n\n    fport: (typeof p.fPort !== \"undefined\") ? p.fPort : null,\n\n    gateway_id: rx0.mac || rx0.gatewayId || null,\n    gateway_name: rx0.name || rx0.gatewayName || null,\n    rssi: (typeof rx0.rssi !== \"undefined\") ? rx0.rssi : null,\n    snr: (typeof rx0.loRaSNR !== \"undefined\") ? rx0.loRaSNR :\n         (typeof rx0.snr !== \"undefined\") ? rx0.snr : null,\n\n    frequency: tx.frequency || null,\n    sf: dr.spreadFactor || null,\n    bandwidth: dr.bandwidth || null,\n\n    raw_data_hex: null,\n    source: \"UG65_Heltec_Only\"\n};\n\n// ----------------------------------------------------\n// Convertir payload LoRa Base64 -> HEX\n// ----------------------------------------------------\nif (p.data) {\n    try {\n        out.raw_data_hex = Buffer.from(p.data, \"base64\").toString(\"hex\").toUpperCase();\n    } catch (e2) {\n        out.raw_data_hex = null;\n    }\n}\n\n// ----------------------------------------------------\n// Si quieres rechazar mensajes sin DevEUI válido, activa esto\n// ----------------------------------------------------\n// if (!out.dev_eui_valid) {\n//     node.warn(\"Mensaje descartado: DevEUI inválido o ausente\");\n//     return null;\n// }\n\n// ----------------------------------------------------\n// Salida\n// ----------------------------------------------------\nmsg.payload = out;\nmsg.topic = \"minerguard/up/\" + (out.dev_eui || \"unknown\");\n\nreturn msg;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 220,
+        "y": 680,
+        "wires": [
+            [
+                "3ea7c91386f9c0a3",
+                "d9c59b8ec1ae1cf2",
+                "54e4e6094ffd5389"
+            ]
+        ]
+    },
+    {
+        "id": "3ea7c91386f9c0a3",
+        "type": "debug",
+        "z": "6d775db641c37ecb",
+        "name": "Debug JSON limpio",
+        "active": false,
+        "tosidebar": true,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 470,
+        "y": 480,
+        "wires": []
+    },
+    {
+        "id": "d9c59b8ec1ae1cf2",
+        "type": "mqtt out",
+        "z": "6d775db641c37ecb",
+        "name": "MQTT limpio local",
+        "topic": "",
+        "qos": "",
+        "retain": "",
+        "respTopic": "",
+        "contentType": "",
+        "userProps": "",
+        "correl": "",
+        "expiry": "",
+        "broker": "mqtt_broker_clean_local_iot2050",
+        "x": 470,
+        "y": 580,
+        "wires": [],
+        "info": "msg.topic = \"minerguard/up/\" + (out.dev_eui || \"unknown\");"
+    },
+    {
+        "id": "72d11ff47e909f26",
+        "type": "function",
+        "z": "6d775db641c37ecb",
+        "name": "Heltec_Dec",
+        "func": "let p = msg.payload;\n\nif (!p || !p.raw_data_hex) {\n    return null;\n}\n\nlet hex = p.raw_data_hex.trim().toUpperCase();\n\n// Compatibilidad: mínimo 36 bytes originales.\nif (hex.length < 72) {\n    node.warn(\"Payload MinerGuard demasiado corto; mínimo 36 bytes: \" + hex);\n    return null;\n}\n\nfunction hexByte(pos) {\n    return parseInt(hex.substr(pos * 2, 2), 16);\n}\n\nfunction readU16BE(bytePos) {\n    return (hexByte(bytePos) << 8) | hexByte(bytePos + 1);\n}\n\nfunction readI32BE(bytePos) {\n    let unsigned =\n        hexByte(bytePos) * 0x1000000 +\n        hexByte(bytePos + 1) * 0x10000 +\n        hexByte(bytePos + 2) * 0x100 +\n        hexByte(bytePos + 3);\n\n    return unsigned >= 0x80000000\n        ? unsigned - 0x100000000\n        : unsigned;\n}\n\nfunction decodeBeacon(base) {\n    let major = readU16BE(base);\n    let minor = readU16BE(base + 2);\n    let rssiEnc = hexByte(base + 4);\n    let rssiReal = rssiEnc - 127;\n\n    let valid = (major > 0 || minor > 0);\n\n    return {\n        valid: valid,\n        major: valid ? major : 0,\n        minor: valid ? minor : 0,\n        rssi: valid ? rssiReal : 0\n    };\n}\n\nlet flags = hexByte(0);\n\nlet panic          = (flags & 0x01) !== 0;\nlet hr_valid       = (flags & 0x02) !== 0;\nlet bandbat_valid  = (flags & 0x04) !== 0;\nlet ble_connected  = (flags & 0x08) !== 0;\nlet gps_valid      = (flags & 0x10) !== 0;\nlet gps_active     = (flags & 0x20) !== 0; // módulo encendido/buscando\n\nlet hr_bpm       = hr_valid ? hexByte(1) : 0;\nlet band_battery = bandbat_valid ? hexByte(2) : 0;\nlet node_id      = hexByte(3) | (hexByte(4) << 8);\n\n// Payload base original: 36 bytes.\nlet b1 = decodeBeacon(6);\nlet b2 = decodeBeacon(11);\nlet b3 = decodeBeacon(16);\nlet b4 = decodeBeacon(21);\nlet b5 = decodeBeacon(26);\nlet b6 = decodeBeacon(31);\n\n// Extensión GPS V2: 46 bytes = 92 caracteres HEX.\nlet gps_payload_present = hex.length >= 92;\nlet latitud = null;\nlet longitud = null;\nlet gps_satelites = null;\nlet gps_hdop = null;\n\nif (gps_payload_present) {\n    let latE6 = readI32BE(36);\n    let lonE6 = readI32BE(40);\n    let sats = hexByte(44);\n    let hdopX10 = hexByte(45);\n\n    gps_satelites = sats;\n    gps_hdop = hdopX10 === 255 ? null : hdopX10 / 10;\n\n    // Solo publicar coordenadas cuando el flag confirma fix válido.\n    if (gps_valid) {\n        latitud = latE6 / 1000000;\n        longitud = lonE6 / 1000000;\n    }\n}\n\nmsg.device_type = \"heltec\";\n\nmsg.payload_decoded = {\n    timestamp: p.timestamp,\n    application: p.application,\n    application_id: p.application_id,\n    device_name: p.device_name,\n    dev_eui: p.dev_eui,\n    fcnt: p.fcnt,\n    fport: p.fport,\n    gateway_id: p.gateway_id,\n    gateway_name: p.gateway_name,\n    rssi: p.rssi,\n    snr: p.snr,\n    frequency: p.frequency,\n    sf: p.sf,\n    bandwidth: p.bandwidth,\n    raw_data_hex: hex,\n    payload_bytes: hex.length / 2,\n\n    flags_raw: flags,\n\n    panic: panic,\n    hr_valid: hr_valid,\n    bandbat_valid: bandbat_valid,\n    hr_bpm: hr_bpm,\n    band_battery: band_battery,\n    node_id: node_id,\n    ble_connected: ble_connected,\n\n    gps_payload_present: gps_payload_present,\n    gps_active: gps_active,\n    gps_valid: gps_valid,\n    latitud: latitud,\n    longitud: longitud,\n    gps_satelites: gps_satelites,\n    gps_hdop: gps_hdop,\n\n    [\"hr_\" + p.device_name]: hr_bpm,\n\n    foto_A: {\n        beacon_1: b1,\n        beacon_2: b2,\n        beacon_3: b3\n    },\n    foto_B: {\n        beacon_4: b4,\n        beacon_5: b5,\n        beacon_6: b6\n    }\n};\n\nnode.status({\n    fill: gps_valid ? \"green\" : (gps_active ? \"yellow\" : \"blue\"),\n    shape: gps_valid ? \"dot\" : \"ring\",\n    text: gps_valid\n        ? `GPS OK ${latitud}, ${longitud} | SAT ${gps_satelites} HDOP ${gps_hdop}`\n        : (gps_active\n            ? `GPS BUSCANDO | ${msg.payload_decoded.payload_bytes} bytes`\n            : `MODO BEACON | GPS OFF | ${msg.payload_decoded.payload_bytes} bytes`)\n});\n\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 670,
+        "y": 760,
+        "wires": [
+            [
+                "d00e14c91aa7e43b",
+                "d362b2500b196dd1"
+            ]
+        ]
+    },
+    {
+        "id": "d00e14c91aa7e43b",
+        "type": "debug",
+        "z": "6d775db641c37ecb",
+        "name": "Debug Heltec decoded",
+        "active": true,
+        "tosidebar": true,
+        "console": true,
+        "tostatus": true,
+        "complete": "payload_decoded",
+        "targetType": "msg",
+        "statusVal": "payload_decoded",
+        "statusType": "auto",
+        "x": 910,
+        "y": 840,
+        "wires": []
+    },
+    {
+        "id": "18f43bb1c54fa0eb",
+        "type": "function",
+        "z": "6d775db641c37ecb",
+        "name": "Mapear_Modbus_Multi",
+        "func": "// =======================================================\n// MAPEAR DATOS HELTEC A HR1...HR20\n// Salida:\n// msg.modbus_mapping = { hr1, hr2, ..., hr20 }\n// msg.payload = [hr1, hr2, ..., hr20]\n//\n// Convención beacons:\n// Major = nivel\n// Minor = PK\n// RSSI  = intensidad de señal\n// =======================================================\n\nlet d = msg.payload_decoded || {};\nlet t = msg.trayectoria || {};\n\nfunction numero(valor, defecto = null) {\n    if (valor === undefined || valor === null || valor === \"\") return defecto;\n    let n = Number(valor);\n    return isNaN(n) ? defecto : n;\n}\n\nfunction boolToInt(v) {\n    return v ? 1 : 0;\n}\n\nfunction tomar(...valores) {\n    for (let v of valores) {\n        if (v !== undefined && v !== null && v !== \"\") {\n            return v;\n        }\n    }\n    return null;\n}\n\n// Validación\nif (!d || !d.node_id) {\n    node.warn(\"No existe msg.payload_decoded.node_id. No se puede mapear HR.\");\n    node.warn(msg);\n    return null;\n}\n\n// =======================================================\n// SNR x10\n// =======================================================\n\nlet snr_x10 = null;\n\nif (d.snr !== undefined && d.snr !== null) {\n    snr_x10 = Math.round(Number(d.snr) * 10);\n}\n\n// =======================================================\n// RSSI de beacons actuales\n// Foto B = lectura más actual.\n// Si no hay beacons prendidos, quedarán NULL.\n// =======================================================\n\nlet bc1_rssi = tomar(\n    d.foto_B && d.foto_B.beacon_4 && d.foto_B.beacon_4.valid\n        ? d.foto_B.beacon_4.rssi\n        : null\n);\n\nlet bc2_rssi = tomar(\n    d.foto_B && d.foto_B.beacon_5 && d.foto_B.beacon_5.valid\n        ? d.foto_B.beacon_5.rssi\n        : null\n);\n\nlet bc3_rssi = tomar(\n    d.foto_B && d.foto_B.beacon_6 && d.foto_B.beacon_6.valid\n        ? d.foto_B.beacon_6.rssi\n        : null\n);\n\n// =======================================================\n// BEACON MÁS FUERTE\n// Major = nivel\n// Minor = PK\n// RSSI  = intensidad\n// =======================================================\n\nfunction obtenerBeaconMasFuerte(d) {\n    let beacons = [];\n\n    function agregarBeacons(foto) {\n        if (!foto) return;\n\n        for (let k in foto) {\n            let b = foto[k];\n\n            if (b && b.valid && b.rssi !== 0) {\n                beacons.push({\n                    major: Number(b.major),\n                    minor: Number(b.minor),\n                    rssi: Number(b.rssi)\n                });\n            }\n        }\n    }\n\n    // Foto B es la actual, Foto A queda como respaldo\n    agregarBeacons(d.foto_B);\n    agregarBeacons(d.foto_A);\n\n    if (beacons.length === 0) return null;\n\n    // RSSI más alto = señal más fuerte.\n    // Ejemplo: -45 es más fuerte que -80.\n    beacons.sort((a, b) => b.rssi - a.rssi);\n\n    return beacons[0];\n}\n\nlet beaconFuerte = obtenerBeaconMasFuerte(d);\n\n// Major del beacon más fuerte.\n// También toma el dato del Filtro Kalman si ya lo calculó.\nlet major_actual = tomar(\n    t.major_actual,\n    t.nivel_actual,\n    beaconFuerte ? beaconFuerte.major : null\n);\n\n// Minor del beacon más fuerte, por respaldo/debug.\nlet minor_actual = tomar(\n    t.minor_actual,\n    t.pk_beacon_mas_fuerte,\n    beaconFuerte ? beaconFuerte.minor : null\n);\n\n// RSSI del beacon más fuerte, por respaldo/debug.\nlet rssi_beacon_mayor = tomar(\n    t.rssi_beacon_mayor,\n    beaconFuerte ? beaconFuerte.rssi : null\n);\n\n// =======================================================\n// HR1 a HR20\n// =======================================================\n\nlet hr = {\n    // HR1 a HR10 → historico_dispositivos\n    hr1: numero(d.node_id, null),                         // id_dispositivo\n    hr2: d.hr_valid ? numero(d.hr_bpm, null) : null,      // heart_rate\n    hr3: boolToInt(d.panic),                              // panico\n    hr4: numero(t.posicion_actual, null),                 // posicion_actual\n    hr5: numero(t.posicion_anterior, null),               // posicion_anterior\n    hr6: numero(t.posicion_futura, null),                 // posicion_futura\n    hr7: numero(d.latitud, null),                         // latitud\n    hr8: numero(d.longitud, null),                        // longitud\n    hr9: numero(d.bateria_tag, null),                     // bateria_tag\n\n    // CAMBIO PRINCIPAL:\n    // Antes HR10 guardaba el RSSI más fuerte.\n    // Ahora HR10 guarda el MAJOR del beacon más fuerte.\n    // En SQL esto se guarda en historico_dispositivos.mayor.\n    // Convención: Major = nivel.\n    hr10: numero(major_actual, null),                     // nivel / major beacon\n\n    // HR11 a HR20 → estado_actual_dispositivos\n    hr11: boolToInt(d.ble_connected),                     // banda_conectada\n    hr12: d.bandbat_valid ? numero(d.band_battery, null) : null, // bateria_banda\n    hr13: numero(d.rssi, null),                           // rssi_lorawan\n    hr14: numero(snr_x10, null),                          // snr_x10\n    hr15: numero(d.fcnt, null),                           // fcnt\n    hr16: numero(d.flags_raw, null),                      // flags\n    hr17: numero(bc1_rssi, null),                         // bc1_rssi\n    hr18: numero(bc2_rssi, null),                         // bc2_rssi\n    hr19: numero(bc3_rssi, null),                         // bc3_rssi\n    hr20: boolToInt(d.gps_valid)                         // GPS: 0=NO, 1=SI\n};\n\n// =======================================================\n// CAMPOS DE RESPALDO / DEBUG\n// =======================================================\n\nmsg.gps = {\n    valido: boolToInt(d.gps_valid),\n    payload_presente: !!d.gps_payload_present,\n    latitud: numero(d.latitud, null),\n    longitud: numero(d.longitud, null),\n    satelites: numero(d.gps_satelites, null),\n    hdop: numero(d.gps_hdop, null)\n};\n\nmsg.modbus_mapping = hr;\n\nmsg.nivel_actual = numero(major_actual, null);\nmsg.major_actual = numero(major_actual, null);\nmsg.minor_actual = numero(minor_actual, null);\nmsg.pk_beacon_mas_fuerte = numero(minor_actual, null);\nmsg.rssi_beacon_mayor = numero(rssi_beacon_mayor, null);\n\n// Payload como arreglo HR1...HR20\nmsg.payload = [\n    hr.hr1,\n    hr.hr2,\n    hr.hr3,\n    hr.hr4,\n    hr.hr5,\n    hr.hr6,\n    hr.hr7,\n    hr.hr8,\n    hr.hr9,\n    hr.hr10,\n    hr.hr11,\n    hr.hr12,\n    hr.hr13,\n    hr.hr14,\n    hr.hr15,\n    hr.hr16,\n    hr.hr17,\n    hr.hr18,\n    hr.hr19,\n    hr.hr20\n];\n\nnode.status({\n    fill: \"green\",\n    shape: \"dot\",\n    text: `ID ${hr.hr1} | GPS ${hr.hr20} | LAT ${hr.hr7 ?? \"-\"} | LON ${hr.hr8 ?? \"-\"}`\n});\n\nreturn msg;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 720,
+        "y": 620,
+        "wires": [
+            [
+                "837111aa0851327b",
+                "34a6f5e634324b36",
+                "add90580251937a7"
+            ]
+        ]
+    },
+    {
+        "id": "837111aa0851327b",
+        "type": "debug",
+        "z": "6d775db641c37ecb",
+        "name": "Debug mapa Modbus",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "true",
+        "targetType": "full",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 720,
+        "y": 200,
+        "wires": []
+    },
+    {
+        "id": "34a6f5e634324b36",
+        "type": "modbus-flex-write",
+        "z": "6d775db641c37ecb",
+        "name": "Local Modbus Server",
+        "showStatusActivities": false,
+        "showErrors": false,
+        "showWarnings": true,
+        "server": "08e7c89cec8cdc07",
+        "emptyMsgOnFail": false,
+        "keepMsgProperties": false,
+        "delayOnStart": false,
+        "startDelayTime": "",
+        "x": 1040,
+        "y": 620,
+        "wires": [
+            [
+                "e37e10b2fda83a15"
+            ],
+            []
+        ]
+    },
+    {
+        "id": "e37e10b2fda83a15",
+        "type": "modbus-server",
+        "z": "6d775db641c37ecb",
+        "name": "Modbus Server IOT2050",
+        "logEnabled": false,
+        "hostname": "0.0.0.0",
+        "serverPort": "1502",
+        "responseDelay": 100,
+        "delayUnit": "ms",
+        "coilsBufferSize": "0",
+        "holdingBufferSize": "100",
+        "inputBufferSize": "0",
+        "discreteBufferSize": "0",
+        "showErrors": false,
+        "showStatusActivities": true,
+        "x": 1270,
+        "y": 360,
+        "wires": [
+            [
+                "590c2344c57d6edc"
+            ],
+            [],
+            [],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "590c2344c57d6edc",
+        "type": "debug",
+        "z": "6d775db641c37ecb",
+        "name": "Respuesta Modbus",
+        "active": false,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "true",
+        "targetType": "full",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1490,
+        "y": 200,
+        "wires": []
+    },
+    {
+        "id": "d362b2500b196dd1",
+        "type": "function",
+        "z": "6d775db641c37ecb",
+        "name": "Filtro Kalman",
+        "func": "let d = msg.payload_decoded || msg.payload;\n\nif (!d || !d.foto_A || !d.foto_B) return msg;\n\n// =======================================================\n// 1. MAPA LINEAL DEL TÚNEL\n// Minor = PK\n// Major = nivel\n// =======================================================\n\nconst mapaPK = {\n    0: 0,\n    20: 20,\n    40: 40,\n    60: 60,\n    80: 80,\n    100: 100\n};\n\nfunction calcularPeso(rssi) {\n    if (rssi === 0 || rssi < -95) return 0.01;\n    return Math.pow(10, ((rssi + 100) / 20));\n}\n\nfunction calcularPosicionLineal(foto) {\n    let sumaPesos = 0;\n    let sumaDistancia = 0;\n\n    for (let key in foto) {\n        let b = foto[key];\n\n        if (b && b.valid) {\n            // Ahora el PK viene desde el Minor.\n            // El Major ya no se usa para calcular la posición lineal.\n            let pk = Number(b.minor);\n\n            if (mapaPK[pk] !== undefined) {\n                let peso = calcularPeso(b.rssi);\n                sumaDistancia += mapaPK[pk] * peso;\n                sumaPesos += peso;\n            }\n        }\n    }\n\n    if (sumaPesos === 0) return null;\n    return sumaDistancia / sumaPesos;\n}\n\n// =======================================================\n// 1.1 OBTENER BEACON MÁS FUERTE\n// Major = nivel\n// Minor = PK\n// RSSI  = intensidad\n// =======================================================\n\nfunction obtenerBeaconMasFuerte(d) {\n    let beacons = [];\n\n    function agregar(foto) {\n        if (!foto) return;\n\n        for (let key in foto) {\n            let b = foto[key];\n\n            if (b && b.valid && b.rssi !== 0) {\n                beacons.push({\n                    major: Number(b.major),\n                    minor: Number(b.minor),\n                    rssi: Number(b.rssi)\n                });\n            }\n        }\n    }\n\n    // Foto B es la lectura más actual.\n    // Foto A queda como respaldo.\n    agregar(d.foto_B);\n    agregar(d.foto_A);\n\n    if (beacons.length === 0) return null;\n\n    // RSSI más alto = señal más fuerte.\n    // Ejemplo: -45 es más fuerte que -80.\n    beacons.sort((a, b) => b.rssi - a.rssi);\n\n    return beacons[0];\n}\n\nlet beaconFuerte = obtenerBeaconMasFuerte(d);\n\nlet major_actual = beaconFuerte ? beaconFuerte.major : null;\nlet minor_actual = beaconFuerte ? beaconFuerte.minor : null;\nlet rssi_beacon_mayor = beaconFuerte ? beaconFuerte.rssi : null;\n\n// =======================================================\n// 2. CÁLCULO DE POSICIÓN\n// =======================================================\n\nlet posA_cruda = calcularPosicionLineal(d.foto_A);\nlet posB_cruda = calcularPosicionLineal(d.foto_B);\n\n// Si no hay PK válido, no calculamos Kalman.\n// Pero igual dejamos guardado el nivel si existe un beacon válido.\nif (posB_cruda === null) {\n    msg.trayectoria = msg.trayectoria || {};\n\n    msg.trayectoria.major_actual = major_actual;\n    msg.trayectoria.nivel_actual = major_actual;\n    msg.trayectoria.minor_actual = minor_actual;\n    msg.trayectoria.pk_beacon_mas_fuerte = minor_actual;\n    msg.trayectoria.rssi_beacon_mayor = rssi_beacon_mayor;\n\n    node.status({\n        fill: \"yellow\",\n        shape: \"ring\",\n        text: `Sin PK válido | Nivel ${major_actual ?? \"-\"}`\n    });\n\n    return msg;\n}\n\n// =======================================================\n// 3. FILTRO DE KALMAN\n// =======================================================\n\nconst R = 8.0;\nconst Q = 0.5;\n\nlet kalmanKey = d.dev_eui || d.node_id || d.device_name || \"default\";\n\nlet x_est = context.get(\"kalman_x_\" + kalmanKey);\nlet P = context.get(\"kalman_P_\" + kalmanKey);\n\nif (x_est === undefined || x_est === null) {\n    x_est = posB_cruda;\n    P = 1.0;\n}\n\nlet x_pred = x_est;\nlet P_pred = P + Q;\n\nlet K = P_pred / (P_pred + R);\n\nx_est = x_pred + K * (posB_cruda - x_pred);\nP = (1 - K) * P_pred;\n\ncontext.set(\"kalman_x_\" + kalmanKey, x_est);\ncontext.set(\"kalman_P_\" + kalmanKey, P);\n\n// Limitar la posición dentro del túnel.\n// Si después usas PK mayores a 100, cambia este límite.\nx_est = Math.max(0, Math.min(100, x_est));\n\n// =======================================================\n// 4. TENDENCIA Y PREDICCIÓN POR TRAMO PK\n// =======================================================\n\nlet prediccion = x_est;\nlet estado_movimiento = \"Calculando...\";\n\nconst pks = [0, 20, 40, 60, 80, 100];\n\nlet pk_inferior = 0;\nlet pk_superior = 20;\n\nfor (let i = 0; i < pks.length - 1; i++) {\n    if (x_est >= pks[i] && x_est <= pks[i + 1]) {\n        pk_inferior = pks[i];\n        pk_superior = pks[i + 1];\n        break;\n    }\n}\n\nif (posA_cruda !== null) {\n    let diferencia = x_est - posA_cruda;\n\n    prediccion = Math.max(0, Math.min(100, x_est + diferencia));\n\n    if (diferencia > 2.0) {\n        estado_movimiento = `Saliendo del PK ${pk_inferior}, entrando al PK ${pk_superior}`;\n    } else if (diferencia < -2.0) {\n        estado_movimiento = `Saliendo del PK ${pk_superior}, entrando al PK ${pk_inferior}`;\n    } else {\n        let pk_cercano = (x_est - pk_inferior < pk_superior - x_est) ? pk_inferior : pk_superior;\n        estado_movimiento = `Detenido cerca del PK ${pk_cercano}`;\n    }\n}\n\n// =======================================================\n// 5. EMPAQUETAR RESULTADO\n// =======================================================\n\nmsg.trayectoria = {\n    metro_actual_crudo: parseFloat(posB_cruda.toFixed(2)),\n    metro_actual_kalman: parseFloat(x_est.toFixed(2)),\n    metro_prediccion: parseFloat(prediccion.toFixed(2)),\n    incertidumbre: parseFloat(P.toFixed(2)),\n    estado: estado_movimiento,\n\n    // Posición anterior desde Foto A\n    metro_anterior_crudo: posA_cruda !== null ? parseFloat(posA_cruda.toFixed(2)) : null,\n\n    // Alias para Mapear_Modbus_Multi y SQL\n    posicion_actual: parseFloat(x_est.toFixed(2)),\n    posicion_anterior: posA_cruda !== null ? parseFloat(posA_cruda.toFixed(2)) : null,\n    posicion_futura: parseFloat(prediccion.toFixed(2)),\n\n    // NUEVO:\n    // Major = nivel\n    // Minor = PK\n    major_actual: major_actual,\n    nivel_actual: major_actual,\n    minor_actual: minor_actual,\n    pk_beacon_mas_fuerte: minor_actual,\n    rssi_beacon_mayor: rssi_beacon_mayor\n};\n\n// Estado visual para confirmar que el filtro está enviando datos\nnode.status({\n    fill: \"green\",\n    shape: \"dot\",\n    text: `Nivel ${major_actual ?? \"-\"} | PK actual: ${msg.trayectoria.posicion_actual} m`\n});\n\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 930,
+        "y": 740,
+        "wires": [
+            [
+                "18f43bb1c54fa0eb",
+                "707fb117cff6d3a7"
+            ]
+        ]
+    },
+    {
+        "id": "707fb117cff6d3a7",
+        "type": "debug",
+        "z": "6d775db641c37ecb",
+        "name": "debug 1",
+        "active": true,
+        "tosidebar": true,
+        "console": true,
+        "tostatus": true,
+        "complete": "true",
+        "targetType": "full",
+        "statusVal": "payload",
+        "statusType": "auto",
+        "x": 1130,
+        "y": 740,
+        "wires": []
+    },
+    {
+        "id": "54e4e6094ffd5389",
+        "type": "switch",
+        "z": "6d775db641c37ecb",
+        "name": "Switch por dev_eui",
+        "property": "payload.dev_eui_valid",
+        "propertyType": "msg",
+        "rules": [
+            {
+                "t": "true"
+            }
+        ],
+        "checkall": "true",
+        "repair": false,
+        "outputs": 1,
+        "x": 330,
+        "y": 860,
+        "wires": [
+            [
+                "72d11ff47e909f26"
+            ]
+        ]
+    },
+    {
+        "id": "627e9f2e5c2ba598",
+        "type": "mysql",
+        "z": "6d775db641c37ecb",
+        "mydb": "8a08ae691f6374fe",
+        "name": "",
+        "x": 1130,
+        "y": 260,
+        "wires": [
+            [
+                "7ebfbd33f0852f61"
+            ]
+        ]
+    },
+    {
+        "id": "7ebfbd33f0852f61",
+        "type": "debug",
+        "z": "6d775db641c37ecb",
+        "name": "debug 2",
+        "active": false,
+        "tosidebar": true,
+        "console": true,
+        "tostatus": false,
+        "complete": "true",
+        "targetType": "full",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1370,
+        "y": 140,
+        "wires": []
+    },
+    {
+        "id": "add90580251937a7",
+        "type": "function",
+        "z": "6d775db641c37ecb",
+        "name": "Preparar_SQL_MariaDB",
+        "func": "// =======================================================\n// PREPARAR SQL MARIADB DESDE HR1...HR20\n// Base: minerguard\n//\n// Salida 1:\n//   historico_dispositivos\n//   HR1 a HR10\n//\n// Salida 2:\n//   estado_actual_dispositivos\n//   HR11 a HR20, usando HR1 como id_dispositivo\n// =======================================================\n\n\n// =======================================================\n// 1. LEER MAPA HR\n// =======================================================\n\nlet hr = msg.modbus_mapping || null;\n\n// Respaldo: si no existe msg.modbus_mapping,\n// reconstruir desde msg.payload SOLO si tiene 20 valores.\nif (!hr && Array.isArray(msg.payload) && msg.payload.length >= 20) {\n    hr = {\n        hr1:  msg.payload[0],\n        hr2:  msg.payload[1],\n        hr3:  msg.payload[2],\n        hr4:  msg.payload[3],\n        hr5:  msg.payload[4],\n        hr6:  msg.payload[5],\n        hr7:  msg.payload[6],\n        hr8:  msg.payload[7],\n        hr9:  msg.payload[8],\n        hr10: msg.payload[9],\n        hr11: msg.payload[10],\n        hr12: msg.payload[11],\n        hr13: msg.payload[12],\n        hr14: msg.payload[13],\n        hr15: msg.payload[14],\n        hr16: msg.payload[15],\n        hr17: msg.payload[16],\n        hr18: msg.payload[17],\n        hr19: msg.payload[18],\n        hr20: msg.payload[19]\n    };\n}\n\nif (!hr) {\n    node.warn(\"Payload recibido:\");\n    node.warn(msg.payload);\n    node.error(\"No existe msg.modbus_mapping ni msg.payload con 20 valores HR. No se guarda en SQL.\", msg);\n    return null;\n}\n\n\n// =======================================================\n// 2. FUNCIONES AUXILIARES\n// =======================================================\n\nfunction numero(valor, defecto = null) {\n    if (valor === undefined || valor === null || valor === \"\") {\n        return defecto;\n    }\n\n    let n = Number(valor);\n    return isNaN(n) ? defecto : n;\n}\n\n\n// =======================================================\n// 3. VALIDAR ID DISPOSITIVO\n// =======================================================\n\nlet id_dispositivo = numero(hr.hr1, null);\n\nif (!id_dispositivo) {\n    node.warn(\"Mapa HR recibido:\");\n    node.warn(hr);\n    node.error(\"hr1 / id_dispositivo no es válido. No se puede guardar en SQL.\", msg);\n    return null;\n}\n\n\n// =======================================================\n// 4. SALIDA 1: HISTÓRICO\n// HR1 A HR10\n// =======================================================\n//\n// HR1  → id_dispositivo\n// HR2  → heart_rate\n// HR3  → panico\n// HR4  → posicion_actual\n// HR5  → posicion_anterior\n// HR6  → posicion_futura\n// HR7  → latitud\n// HR8  → longitud\n// HR9  → bateria_tag\n// HR10 → mayor\n// =======================================================\n\nlet msgHistorico = {};\n\nmsgHistorico.topic = `\nINSERT INTO historico_dispositivos (\n    id_dispositivo,\n    heart_rate,\n    panico,\n    posicion_actual,\n    posicion_anterior,\n    posicion_futura,\n    latitud,\n    longitud,\n    bateria_tag,\n    mayor\n) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n`;\n\nmsgHistorico.payload = [\n    id_dispositivo,          // HR1\n    numero(hr.hr2, null),    // HR2  heart_rate\n    numero(hr.hr3, 0),       // HR3  panico\n    numero(hr.hr4, null),    // HR4  posicion_actual\n    numero(hr.hr5, null),    // HR5  posicion_anterior\n    numero(hr.hr6, null),    // HR6  posicion_futura\n    numero(hr.hr7, null),    // HR7  latitud\n    numero(hr.hr8, null),    // HR8  longitud\n    numero(hr.hr9, null),    // HR9  bateria_tag\n    numero(hr.hr10, null)    // HR10 mayor\n];\n\nmsgHistorico.tipo_sql = \"historico_dispositivos\";\nmsgHistorico.hr_original = hr;\nmsgHistorico.mqtt_topic = msg.topic;\n\n\n// =======================================================\n// 5. SALIDA 2: ESTADO ACTUAL\n// HR11 A HR20\n// =======================================================\n//\n// HR1  → id_dispositivo\n// HR11 → banda_conectada\n// HR12 → bateria_banda\n// HR13 → rssi_lorawan\n// HR14 → snr_x10\n// HR15 → fcnt\n// HR16 → flags\n// HR17 → bc1_rssi\n// HR18 → bc2_rssi\n// HR19 → bc3_rssi\n// HR20 → valor_cero\n// =======================================================\n\nlet msgEstado = {};\n\nmsgEstado.topic = `\nINSERT INTO estado_actual_dispositivos (\n    id_dispositivo,\n    banda_conectada,\n    bateria_banda,\n    rssi_lorawan,\n    snr_x10,\n    fcnt,\n    flags,\n    bc1_rssi,\n    bc2_rssi,\n    bc3_rssi,\n    valor_cero\n) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\nON DUPLICATE KEY UPDATE\n    banda_conectada = VALUES(banda_conectada),\n    bateria_banda = VALUES(bateria_banda),\n    rssi_lorawan = VALUES(rssi_lorawan),\n    snr_x10 = VALUES(snr_x10),\n    fcnt = VALUES(fcnt),\n    flags = VALUES(flags),\n    bc1_rssi = VALUES(bc1_rssi),\n    bc2_rssi = VALUES(bc2_rssi),\n    bc3_rssi = VALUES(bc3_rssi),\n    valor_cero = VALUES(valor_cero),\n    fecha_actualizacion = CURRENT_TIMESTAMP\n`;\n\nmsgEstado.payload = [\n    id_dispositivo,          // HR1\n    numero(hr.hr11, 0),      // HR11 banda_conectada\n    numero(hr.hr12, null),   // HR12 bateria_banda\n    numero(hr.hr13, null),   // HR13 rssi_lorawan\n    numero(hr.hr14, null),   // HR14 snr_x10\n    numero(hr.hr15, null),   // HR15 fcnt\n    numero(hr.hr16, null),   // HR16 flags\n    numero(hr.hr17, null),   // HR17 bc1_rssi\n    numero(hr.hr18, null),   // HR18 bc2_rssi\n    numero(hr.hr19, null),   // HR19 bc3_rssi\n    numero(hr.hr20, 0)       // HR20 valor_cero\n];\n\nmsgEstado.tipo_sql = \"estado_actual_dispositivos\";\nmsgEstado.hr_original = hr;\nmsgEstado.mqtt_topic = msg.topic;\n\n\n// =======================================================\n// 6. ESTADO VISUAL DEL NODO\n// =======================================================\n\nnode.status({\n    fill: \"green\",\n    shape: \"dot\",\n    text: \"SQL HR listo ID \" + id_dispositivo\n});\n\n\n// =======================================================\n// 7. RETORNAR CUATRO SALIDAS\n// =======================================================\n//\n// Salida 1 → MariaDB antigua histórico\n// Salida 2 → MariaDB antigua estado actual\n// Salida 3 → MariaDB nueva histórico\n// Salida 4 → MariaDB nueva estado actual\n// =======================================================\n\n// Se crean copias para enviar lo mismo a ambas bases\nlet msgHistoricoAntigua = {\n    topic: msgHistorico.topic,\n    payload: msgHistorico.payload,\n    tipo_sql: \"historico_antigua\",\n    hr_original: msgHistorico.hr_original,\n    mqtt_topic: msgHistorico.mqtt_topic\n};\n\nlet msgEstadoAntigua = {\n    topic: msgEstado.topic,\n    payload: msgEstado.payload,\n    tipo_sql: \"estado_actual_antigua\",\n    hr_original: msgEstado.hr_original,\n    mqtt_topic: msgEstado.mqtt_topic\n};\n\nlet msgHistoricoNueva = {\n    topic: msgHistorico.topic,\n    payload: msgHistorico.payload,\n    tipo_sql: \"historico_nueva\",\n    hr_original: msgHistorico.hr_original,\n    mqtt_topic: msgHistorico.mqtt_topic\n};\n\nlet msgEstadoNueva = {\n    topic: msgEstado.topic,\n    payload: msgEstado.payload,\n    tipo_sql: \"estado_actual_nueva\",\n    hr_original: msgEstado.hr_original,\n    mqtt_topic: msgEstado.mqtt_topic\n};\n\nreturn [\n    msgHistoricoAntigua,\n    msgEstadoAntigua,\n    msgHistoricoNueva,\n    msgEstadoNueva\n];",
+        "outputs": 4,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 850,
+        "y": 280,
+        "wires": [
+            [
+                "069c16e4063063a7"
+            ],
+            [
+                "627e9f2e5c2ba598"
+            ],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "069c16e4063063a7",
+        "type": "mysql",
+        "z": "6d775db641c37ecb",
+        "mydb": "8a08ae691f6374fe",
+        "name": "",
+        "x": 1070,
+        "y": 160,
+        "wires": [
+            [
+                "2288ac3d8c63ef99"
+            ]
+        ]
+    },
+    {
+        "id": "2288ac3d8c63ef99",
+        "type": "debug",
+        "z": "6d775db641c37ecb",
+        "name": "debug 3",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "true",
+        "targetType": "full",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1080,
+        "y": 40,
+        "wires": []
+    },
+    {
+        "id": "mqtt_broker_ug65_iot2050",
+        "type": "mqtt-broker",
+        "name": "Mosquitto",
+        "broker": "127.0.0.1",
+        "port": "1883",
+        "clientid": "iot2050_minerguard_t1000",
+        "autoConnect": true,
+        "usetls": false,
+        "compatmode": false,
+        "protocolVersion": 4,
+        "keepalive": "60",
+        "cleansession": true,
+        "autoUnsubscribe": true,
+        "birthTopic": "",
+        "birthQos": "0",
+        "birthRetain": "false",
+        "birthPayload": "",
+        "closeTopic": "",
+        "closeQos": "0",
+        "closeRetain": "false",
+        "closePayload": "",
+        "willTopic": "",
+        "willQos": "0",
+        "willRetain": "false",
+        "willPayload": ""
+    },
+    {
+        "id": "mqtt_broker_clean_local_iot2050",
+        "type": "mqtt-broker",
+        "name": "MQTT limpio local IOT2050",
+        "broker": "127.0.0.1",
+        "port": "1883",
+        "clientid": "iot2050_clean_out",
+        "autoConnect": true,
+        "usetls": false,
+        "protocolVersion": 4,
+        "keepalive": "60",
+        "cleansession": true,
+        "autoUnsubscribe": true,
+        "birthTopic": "",
+        "birthQos": "0",
+        "birthRetain": "false",
+        "birthPayload": "",
+        "closeTopic": "",
+        "closeQos": "0",
+        "closeRetain": "false",
+        "closePayload": "",
+        "willTopic": "",
+        "willQos": "0",
+        "willRetain": "false",
+        "willPayload": ""
+    },
+    {
+        "id": "08e7c89cec8cdc07",
+        "type": "modbus-client",
+        "name": "",
+        "clienttype": "tcp",
+        "bufferCommands": true,
+        "stateLogEnabled": false,
+        "queueLogEnabled": false,
+        "failureLogEnabled": true,
+        "tcpHost": "127.0.0.1",
+        "tcpPort": "1502",
+        "tcpType": "DEFAULT",
+        "serialPort": "/dev/ttyUSB",
+        "serialType": "RTU-BUFFERD",
+        "serialBaudrate": 9600,
+        "serialDatabits": 8,
+        "serialStopbits": 1,
+        "serialParity": "none",
+        "serialConnectionDelay": 100,
+        "serialAsciiResponseStartDelimiter": "0x3A",
+        "unit_id": 1,
+        "commandDelay": 1,
+        "clientTimeout": 1000,
+        "reconnectOnTimeout": true,
+        "reconnectTimeout": 2000,
+        "parallelUnitIdsAllowed": true,
+        "showErrors": false,
+        "showWarnings": true,
+        "showLogs": true
+    },
+    {
+        "id": "8a08ae691f6374fe",
+        "type": "MySQLdatabase",
+        "name": "MariaDB_sql",
+        "host": "192.168.100.104",
+        "port": "3306",
+        "db": "minerguard",
+        "tz": "local",
+        "charset": "utf8mb4"
+    },
+    {
+        "id": "5663228e66889188",
+        "type": "global-config",
+        "env": [],
+        "modules": {
+            "node-red-contrib-modbus": "5.45.2",
+            "node-red-node-mysql": "3.0.0"
+        }
+    }
+]

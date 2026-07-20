@@ -44,7 +44,7 @@ Se mantienen el mismo DevEUI, JoinEUI/AppEUI y AppKey del proyecto anterior.
 ## Compilar
 
 ```powershell
-cd "C:\Users\Innovacion FMT\Documents\Tomas\pruebalilygo\PlatformIO_Minerguard_TEcho_4_LMIC_GPS_HR7_HR8_HR20_V2"
+cd "C:USERPROFILE\pruebalilygo\PlatformIO_Minerguard_TEcho_4_LMIC_GPS_HR7_HR8_HR20_V2"
 
 & "$env:USERPROFILE\.platformio\penv\Scripts\platformio.exe" run -e minerguard_techo_6_gps_hr20
 ```

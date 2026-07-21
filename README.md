@@ -1,4 +1,4 @@
-# Programa Lámpara 2
+# Minerguard
 
 ## Introducción
 
